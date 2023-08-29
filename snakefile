@@ -2,16 +2,9 @@ configfile: "config/config.yaml"
 
 rule microbiome_qiime_processing:
     input:
-        input_dir = config[]
+        input_dir = config["qiime_data_dir"]
     output:
-        out_file = out_dir + "04-SELECTED-FEATURES-{reference}/"
-                   "{reference}.txt"
-    params:
-        reference_time = "{reference}",
-        absolute_values = "no",
-        build_datatable = config["build_datatable"], # TODO have this be optional default true
-        distance_matrices = config["distance_matrices"],
-    conda: "conda_envs/r_env.yaml",
+        output_dir = config["qiime_data_dir"]
     script:
         "scripts/create_deltas.sh"
 
