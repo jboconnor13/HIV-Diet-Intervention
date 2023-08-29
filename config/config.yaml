@@ -15,4 +15,4 @@ jobs:
 
     steps:
       - name: Run Bash script
-        run: bash path/to/your_bash_script.sh
+        run: scripts/Microbiome_Processing.sh
