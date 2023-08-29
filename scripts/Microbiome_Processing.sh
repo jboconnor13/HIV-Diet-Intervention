@@ -100,18 +100,18 @@ qiime taxa barplot \
    --o-visualization taxa-bar-plots.qzv
 ################################################################################################################################################################
 ##--Differential abundance testing with ANCOM-------------------------------------------------------------------------------------------------------------######
-qiime composition add-pseudocount \
-   --i-table feature-table-dm.qza \
-   --o-composition-table comp-feature-table.qza
+#qiime composition add-pseudocount \
+#   --i-table feature-table-dm.qza \
+#   --o-composition-table comp-feature-table.qza
 
-qiime feature-table filter-samples \
-   --i-table comp-feature-table.qza \
-   --m-metadata-file sample-metadata-dm-12122022.tsv \
-   --p-where "[Timepoint]='1'" \
-   --o-filtered-table comp-feature-table-1.qza
+#qiime feature-table filter-samples \
+#   --i-table comp-feature-table.qza \
+#   --m-metadata-file sample-metadata-dm-12122022.tsv \
+#   --p-where "[Timepoint]='1'" \
+#   --o-filtered-table comp-feature-table-1.qza
 
-qiime composition ancom \
-   --i-table comp-feature-table-1.qza \
-   --m-metadata-file sample-metadata-dm-12122022.tsv \
-   --m-metadata-column HIV_Status \
-   --o-visualization ancom-hiv.qzv
+#qiime composition ancom \
+#   --i-table comp-feature-table-1.qza \
+#   --m-metadata-file sample-metadata-dm-12122022.tsv \
+#   --m-metadata-column HIV_Status \
+#   --o-visualization ancom-hiv.qzv
