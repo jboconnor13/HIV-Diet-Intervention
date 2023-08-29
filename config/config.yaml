@@ -4,6 +4,10 @@
 ##############################################################################
 analyst: "Jack OConnor"
 repository: "HIV-Diet-Intervention"
+scripts_dir: scripts
+qiime_data_dir: data/QIIME_Files
+r_data_dir:
+
 on:
   push:
     branches:
