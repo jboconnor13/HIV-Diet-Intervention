@@ -2,7 +2,7 @@ configfile: "config/config.yaml"
 
 rule microbiome_qiime_processing:
     input:
-        in_file = path_original + "original.txt"
+        input_dir = config[]
     output:
         out_file = out_dir + "04-SELECTED-FEATURES-{reference}/"
                    "{reference}.txt"
