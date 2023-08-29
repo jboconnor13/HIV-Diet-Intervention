@@ -1,3 +1,5 @@
+configfile: "config/config.yaml"
+
 rule microbiome_qiime_processing:
     input:
         in_file = path_original + "original.txt"
