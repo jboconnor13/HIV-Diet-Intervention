@@ -8,15 +8,3 @@ scripts_dir: "scripts"
 qiime_data_dir: "data/QIIME_Files"
 
 
-on:
-  push:
-    branches:
-      - main
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Run Bash script
-        run: scripts/Microbiome_Processing.sh
