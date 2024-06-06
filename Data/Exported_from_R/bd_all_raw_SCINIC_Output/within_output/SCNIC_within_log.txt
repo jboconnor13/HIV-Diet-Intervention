@@ -1,0 +1,10 @@
+start time: 2024-05-29 09:42:09.601486
+SCNIC analysis type: within
+input table: bd_all_raw.biom
+number of samples in input table: 55
+number of observations in input table: 51
+output directory: /Users/johnoconnor/DM-HIV-Repository/Data/Exported_from_R/bd_all_raw_SCINIC_Output/within_output
+number of processors used: 1
+distance metric used: sparcc
+finish time: 2024-05-29 09:42:15.211816
+elapsed time: 0:00:05.610330
