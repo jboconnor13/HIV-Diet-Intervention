@@ -27,7 +27,6 @@
 ## p.signif=Asterisks indicating significance
 
 long_stat_sum <- function(data, sub_vars, tm_var, dep_vars, rand_var, normality, adj="bonferroni", pw="same") {
-  
   #First we pull the length of the subset variables
   sub_var_num <- length(sub_vars)
   #We generate a blank list that we subsequently add to
@@ -252,6 +251,7 @@ long_stat_sum <- function(data, sub_vars, tm_var, dep_vars, rand_var, normality,
     stats_sum_table$padj[stat_tab_rows] <- p.adjust(stats_sum_table$`p-value`[stat_tab_rows], method=adj)
     #Now we add significance asterisks
     for (m in stat_tab_rows) {
+      if (!is.na(stats_sum_table$padj[m])) {
       if (stats_sum_table$padj[m]<0.001) {
         stats_sum_table$p.signif[m] <- "***"
         # If p-value is below not under 0.001 but is under 0.01 two stars are provided
@@ -263,6 +263,7 @@ long_stat_sum <- function(data, sub_vars, tm_var, dep_vars, rand_var, normality,
         # If p-value is below not under 0.05, "ns" provided to indicate not significant
       } else {
         stats_sum_table$p.signif[m] <- "ns"
+      }
       }
     }
   }

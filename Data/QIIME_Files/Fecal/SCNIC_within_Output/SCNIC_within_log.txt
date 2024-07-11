@@ -1,0 +1,10 @@
+start time: 2024-07-11 14:14:28.229195
+SCNIC analysis type: within
+input table: exported-genus-collapsed-sepp-filtered-rarefied-table/feature-table.biom
+number of samples in input table: 251
+number of observations in input table: 257
+output directory: /Users/johnoconnor/HIV-Diet-Intervention/Data/QIIME_Files/Fecal/SCNIC_within_Output
+number of processors used: 1
+distance metric used: sparcc
+finish time: 2024-07-11 14:14:45.864376
+elapsed time: 0:00:17.635181

@@ -1,0 +1,1292 @@
+---
+title: "DM Combined CyTOF ANalysis"
+author: "J. O'Connor"
+date: "2023-10-30"
+output: html_document
+---
+
+## R Baseline Data Analysis
+
+This is an R Markdown document that includes the R analysis for the study population baseline data.
+
+### Initial Data Loading and Preprocessing
+
+The initial data is loaded
+
+
+```{r}
+# The Working Directory is Set
+setwd("../..")
+
+#Initial Libraries are loaded
+
+library(compositions) #Version
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(ggfortify)
+library(ggpubr)
+library(stringr)
+library(ggrepel)
+library(mice)
+library(vegan)
+library(ape)
+library(ggpubr)
+library(rstatix)
+library(cowplot)
+library(pheatmap)
+library(randomForest)
+library(VSURF)
+library(ggplot2)
+library (ggpubr)
+library(tidyr)
+library(reshape2)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(factoextra)
+library(httr)
+library(jsonlite)
+library(stringr)
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(afex)
+library(phyloseq)
+library(qiime2R)
+library(vegan)
+library(ape)
+library(ggpubr)
+library(rstatix)
+library(cowplot)
+library(gridExtra)
+library(ggpubr)
+library(jsonlite)
+library(qiime2R)
+library(phyloseq)
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(afex)
+library(microbiome)
+library(microshades)
+library(speedyseq)
+library(compositions) 
+library(tidyr)
+library(ggforce)
+library(ggh4x)
+library(RColorBrewer)
+library(pheatmap)
+library(ggrepel)
+library(EnhancedVolcano)
+library(mice)
+library(biomformat)
+library(glmmLasso)
+library(stats)
+library(ggplot2)
+library(ANCOMBC)
+library(factoextra)
+
+
+# Necessary Functions are Sourced 
+function_files <- list.files(paste0(getwd(),"/Functions"), pattern = "\\.R$", full.names = TRUE)
+lapply(function_files, source)
+
+# Metadata is pulled in from an excel file
+metadata <- read_xlsx("Data/Metadata/metadata.xlsx")
+
+####Manual MSM edits #####
+
+#Based on individual manual characterizations we altered some unknown MSM statuses
+#Below is the table with the specified MSM statuses
+MSM_spec <- rbind(c("DM001", "MSM", "MSM"),
+                  c("DM002", "MSM", "MSM"),
+                  c("DM007", "MSM", "MSM"),
+                  c("DM010", "MSM", "MSM"),
+                  c("DM021", "MSW", "NonMSM"),
+                  c("DM093", "MSW", "NonMSM"),
+                  c("DM046", "MSM", "MSM"))
+#We name the columns to match the clinical data set
+colnames(MSM_spec) <- c("StudyID", "MSM_status", "MSM_status2")
+MSM_spec <- as.data.frame(MSM_spec)
+
+#We then go through the metadata and manually adjust the avlues
+for (j in 1:nrow(metadata)) {
+  #Is the study ID is in the table we change the values
+  if (metadata$StudyID[j] %in% MSM_spec$StudyID) {
+    MSM_status_j <- unique(MSM_spec$MSM_status[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    MSM_status2_j <- unique(MSM_spec$MSM_status2[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    metadata$MSM_status[j] <-MSM_status_j 
+    metadata$MSM_status2[j] <-MSM_status2_j 
+  }
+}
+#We create simpler names for the fields of interest
+metadata["MSM"] <- metadata$MSM_status2
+metadata["HIV"] <- paste0("HIV-",metadata$HIV_Status)
+metadata["Age"] <- as.numeric((metadata$DateOfVisit-metadata$DOB)/365.25)
+#We adjust rownames to be consistent (studyID combined with the timepoint)
+rownames(metadata) <- paste0(metadata$StudyID,"-",metadata$TimepointNumeric)
+
+#A Group field is been added manually to link groups based on discussions with collaborators 
+metadata["Group"] <- paste0("HIV-",metadata$HIV_Status,"-",metadata$MSM_status)
+
+#For simplicity and aesthetics positive and negative are replaces with the symbols 
+metadata$Group <- gsub("-Positive-","(+)",metadata$Group)
+metadata$Group <- gsub("-Negative-","(-)",metadata$Group)
+
+#Clinical data is selected from the Metadata 
+clin <- unique(metadata[which(metadata$Group %in% c("HIV(+)MSM", "HIV(-)MSM", "HIV(-)MSW")),])
+clin <- as.data.frame(clin)
+clin["Diet.Timepoint"] <- paste0(clin$Diet, "-", clin$TimepointNumeric)
+rownames(clin) <- paste0(clin$StudyID,"-",clin$TimepointNumeric)
+clin["StudyID.Timepoint"] <- paste0(clin$StudyID,"-",clin$TimepointNumeric)
+#Now we Load the QIIME Objects of the Fecal and Microbiome 
+##We add needed clin vars to each metadta set so those are specified
+clin_vars_add <- c("Diet","Group","HIV_Status", "MSM_status","Age","HDL","LDL","Triglycerides","HOMAIR","LBP","IL6","CRP","Timepoint")
+#### Fecal Data #########################################
+#16S Data is Loaded from QIIME outputs 
+
+
+#qiime2R is used to generate aphyloseq object from the exported files
+fecal.tax.plot.data <- qiime2R::qza_to_phyloseq(features="Data/QIIME_Files/Fecal/Alpine_Output_070224/sepp-filtered-rarefied.qza",
+                                      taxonomy="Data/QIIME_Files/Fecal/gg-taxonomy.qza",
+                                      metadata="Data/QIIME_Files/Fecal/Metadata/metadata.tsv")
+
+for (v in clin_vars_add) {
+  fecal.tax.plot.data@sam_data[v] <- NA
+  col_v_qiime <- which(colnames(fecal.tax.plot.data@sam_data)==v)
+  col_v_clin <- which(colnames(clin)==v)
+  for (r in 1:nrow(fecal.tax.plot.data@sam_data)) {
+   stud_r <- fecal.tax.plot.data@sam_data$StudyID[r]
+    tp_r <- fecal.tax.plot.data@sam_data$TimepointNumeric[r]
+    clin_row <- which(clin$StudyID==stud_r & clin$TimepointNumeric==tp_r)
+    if (length(clin_row)==1) {
+     fecal.tax.plot.data@sam_data[r,col_v_qiime] <- clin[clin_row,col_v_clin]  
+    }
+  }
+}
+#We also pull the alpha diversity measures
+fecal.shannon <- read.table('Data/QIIME_Files/Fecal/Diversity_Results/Shannon/alpha-diversity.tsv', header=TRUE, sep='\t', row.names=1)
+colnames(fecal.shannon) <- "Shannon_Diversity"
+
+fecal.faith <- read.table('Data/QIIME_Files/Fecal/Diversity_Results/Faith/alpha-diversity.tsv', header=TRUE, sep='\t', row.names=1)
+colnames(fecal.faith) <- "Faith_Diversity"
+
+###We also pull the biplot results
+fecal.wu.biplot <-read_qza("Data/QIIME_Files/Fecal/Diversity_Results/WU_biplot.qza")
+fecal.uu.biplot <-read_qza("Data/QIIME_Files/Fecal/Diversity_Results/UU_biplot.qza")
+
+#### Biopsy Data #########################################
+#16S Data is Loaded from QIIME outputs 
+
+#qiime2R is used to generate aphyloseq object from the exported files
+biopsy.tax.plot.data <- qiime2R::qza_to_phyloseq(features="Data/QIIME_Files/Biopsy/Alpine_Output_070224/sepp-filtered-rarefied.qza",
+                                      taxonomy="Data/QIIME_Files/Biopsy/gg-taxonomy.qza",
+                                      metadata="Data/QIIME_Files/Biopsy/Metadata/allmetadata.txt")
+
+for (v in clin_vars_add) {
+  biopsy.tax.plot.data@sam_data[v] <- NA
+  col_v_qiime <- which(colnames(biopsy.tax.plot.data@sam_data)==v)
+  col_v_clin <- which(colnames(clin)==v)
+  for (r in 1:nrow(biopsy.tax.plot.data@sam_data)) {
+    stud_r <- biopsy.tax.plot.data@sam_data$StudyID[r]
+    tp_r <- biopsy.tax.plot.data@sam_data$TimepointNumeric[r]
+    clin_row <- which(clin$StudyID==stud_r & clin$TimepointNumeric==tp_r)
+    if (length(clin_row)==1) {
+     biopsy.tax.plot.data@sam_data[r,col_v_qiime] <- clin[clin_row,col_v_clin] 
+    }
+
+  }
+}
+
+#We also pull the alpha diversity measures
+biopsy.shannon <- read.table('Data/QIIME_Files/Biopsy/Diversity_Results/Shannon/alpha-diversity.tsv', header=TRUE, sep='\t', row.names=1)
+colnames(biopsy.shannon) <- "Shannon_Diversity"
+
+biopsy.faith <- read.table('Data/QIIME_Files/Biopsy/Diversity_Results/Faith/alpha-diversity.tsv', header=TRUE, sep='\t', row.names=1)
+colnames(biopsy.faith) <- "Faith_Diversity"
+
+###We also pull the biplot results
+biopsy.wu.biplot <-read_qza("Data/QIIME_Files/Biopsy/Diversity_Results/WU_biplot.qza")
+biopsy.uu.biplot <-read_qza("Data/QIIME_Files/Biopsy/Diversity_Results/UU_biplot.qza")
+
+
+```
+###Fecal Analysis
+
+Initial Analysis of Fecal Analysis
+
+####Alpha Diversity
+
+Alpha diversity is Assessed
+
+#####Shannon
+```{r}
+
+###The StudyID and Timepoint are appended to the shannon diversity
+fecal.shannon_met <- cbind(fecal.tax.plot.data@sam_data[,c("StudyID.Timepoint")],fecal.shannon)
+
+###The clinical data is added
+fecal.shannon_clin <- inner_join(fecal.shannon_met, clin, by="StudyID.Timepoint")
+
+####Normality is assessed
+fecal.shannon.shapiro <- shapiro_test(fecal.shannon_clin$Shannon_Diversity)
+if (fecal.shannon.shapiro$p.value<0.05) {
+  print("Fecal Shannon Diversity is NOT normally distributed")
+} else {
+  print("Fecal Shannon Diversity is normally distributed")
+}
+###We assess differences by group 
+fecal.shannon_gp_stats <- gp_stat_sum(data=fecal.shannon_clin,
+                                sub_vars=c("Timepoint"),
+                                dep_vars="Shannon_Diversity",
+                                gp_var="Group",
+                                normality=FALSE,
+                                adj="bonferroni")
+
+####Shannonn IQRs are pulled
+fecal.shannon.iqr <- fecal.shannon_clin %>% 
+                        group_by(Group,Timepoint) %>% 
+                        summarise(median=median(Shannon_Diversity), 
+                                  percentile_25 = quantile(Shannon_Diversity, 0.25),
+                                  percentile_75 = quantile(Shannon_Diversity, 0.75)
+                                  )
+
+fecal.shannon.dietiqr <- fecal.shannon_clin %>% 
+                        group_by(Diet,Timepoint) %>% 
+                        summarise(median=median(Shannon_Diversity), 
+                                  percentile_25 = quantile(Shannon_Diversity, 0.25),
+                                  percentile_75 = quantile(Shannon_Diversity, 0.75)
+                                  )
+
+###We assess changes longitudinally 
+fecal.shannon_long_stats <- long_stat_sum(data=fecal.shannon_clin,
+                                sub_vars=c("Diet"),
+                                tm_var="Timepoint",
+                                dep_vars="Shannon_Diversity",
+                                rand_var="StudyID",
+                                normality=FALSE,
+                                adj="bonferroni",
+                                pw="separate")
+
+###We assess changes longitudinally by Group
+fecal.shannon_long_stats_bygp <- long_stat_sum(data=fecal.shannon_clin,
+                                sub_vars=c("Diet","Group"),
+                                tm_var="Timepoint",
+                                dep_vars="Shannon_Diversity",
+                                rand_var="StudyID",
+                                normality=FALSE,
+                                adj="bonferroni",
+                                pw="same")
+
+```
+
+#####Faith's
+```{r}
+
+###The StudyID and Timepoint are appended to the shannon diversity
+
+fecal.intersect_rownames <- intersect(rownames(fecal.tax.plot.data@sam_data),rownames(fecal.faith))
+
+fecal.faith_met <- cbind(fecal.tax.plot.data@sam_data[fecal.intersect_rownames,c("StudyID.Timepoint")],fecal.faith)
+
+###The clinical data is added
+fecal.faith_clin <- inner_join(fecal.faith_met, clin, by="StudyID.Timepoint")
+
+####Normality is assessed
+fecal.faith.shapiro <- shapiro_test(fecal.faith_clin$Faith_Diversity)
+if (fecal.faith.shapiro$p.value<0.05) {
+  print("Fecal Faith Diversity is NOT normally distributed")
+} else {
+  print("Fecal Faith Diversity is normally distributed")
+}
+###We assess differences by group 
+fecal.faith_gp_stats <- gp_stat_sum(data=fecal.faith_clin,
+                                sub_vars=c("Timepoint"),
+                                dep_vars="Faith_Diversity",
+                                gp_var="Group",
+                                normality=FALSE,
+                                adj="bonferroni")
+
+####Shannonn IQRs are pulled
+fecal.faith.iqr <- fecal.faith_clin %>% 
+                        group_by(Group,Timepoint) %>% 
+                        summarise(median=median(Faith_Diversity), 
+                                  percentile_25 = quantile(Faith_Diversity, 0.25),
+                                  percentile_75 = quantile(Faith_Diversity, 0.75)
+                                  )
+
+###We assess changes longitudinally 
+fecal.faith_long_stats <- long_stat_sum(data=fecal.faith_clin,
+                                sub_vars=c("Diet"),
+                                tm_var="Timepoint",
+                                dep_vars="Faith_Diversity",
+                                rand_var="StudyID",
+                                normality=FALSE,
+                                adj="bonferroni",
+                                pw="separate")
+
+###We assess changes longitudinally by Group
+fecal.faith_long_stats_bygp <- long_stat_sum(data=fecal.faith_clin,
+                                sub_vars=c("Diet","Group"),
+                                tm_var="Timepoint",
+                                dep_vars="Faith_Diversity",
+                                rand_var="StudyID",
+                                normality=FALSE,
+                                adj="bonferroni",
+                                pw="same")
+
+```
+####Differential Abundance at Baseline
+
+```{r}
+#Baseline Data is pulled 
+fecal.t1.data <- subset_samples(fecal.tax.plot.data, Timepoint == "T1") 
+
+#For the HIV comparisons we select MSM samples (to compare HIV(+)MSM vs HIV(-)MSM)
+fecal.msm.data <- subset_samples(fecal.t1.data, MSM_status == "MSM")
+
+#We use ANCOM-BC to assess differences by HIV Status
+fecal.hiv_diff <- ancombc2(
+  data = fecal.msm.data, 
+  tax_level = 'Genus',
+  fix_formula = 'HIV_Status',
+  p_adj_method="fdr"
+)
+
+#For the MSM comparisons we select HIV-negative samples (to compare HIV(-)MSM vs HIV(-)MSW)
+fecal.hivn.data <- subset_samples(fecal.t1.data, HIV_Status == "Negative")
+
+#We use ANCOM-BC to assess differences by MSM Status
+fecal.msm_diff <- ancombc2(
+  data = fecal.hivn.data, 
+  tax_level = 'Genus',
+  fix_formula = 'MSM_status',
+  p_adj_method="fdr"
+)
+```
+
+####Changes on Agrarian Diet
+
+```{r}
+#Data from Agrarian Subjects is pulled 
+fecal.ag.data <- subset_samples(fecal.tax.plot.data, Diet == "Agrarian") 
+
+#We use ANCOM-BC to assess longitudinal differences assessing for changes using random effect of study ID
+fecal.ag_diff <- ancombc2(
+  data = fecal.ag.data, 
+  tax_level = 'Genus',
+  fix_formula = 'TimepointNumeric',
+  p_adj_method="fdr",
+  rand_formula = '(1 | StudyID)'
+)
+```
+
+
+####Abundance Bar Plot
+```{r}
+
+fecal.tax.plot.data.filt <- subset_samples(fecal.tax.plot.data, !(is.na(Group)))
+#First we need to prep_mdf the mdf_object 
+fecal.gen <- prep_mdf(fecal.tax.plot.data.filt, subgroup_level="Genus")
+fecal.gen$Timepoint <- paste0("T",fecal.gen$TimepointNumeric)
+
+
+
+#Now we create a display genus field that simplifies 
+fecal.gen$DisplayGenus <- other_generator(data=fecal.gen,
+                                          name_field="Genus",
+                                          type="Top Median",
+                                          threshold=39,
+                                          abundance_field="Abundance",
+                                          id_var="StudyID.Timepoint")
+                                          
+##Below we generate the color pallet putting other on the end
+#First we pull all the dusiplay genera
+fecal.new_genus_un <- unique(fecal.gen$DisplayGenus)
+#We determine how many there are
+fecal.new_genus_num <- length(fecal.new_genus_un)
+#We pull all those that are not other
+fecal.new_genus_un_not_other <- setdiff(as.vector(fecal.new_genus_un), "Other")
+#We select the number of genera that are not categorized as Other
+fecal.new_genus_num_not_other <-fecal.new_genus_num-1  
+#We select the number of genera that are not categorized as Other we then pull out a pallet for those
+fecal.n <- fecal.new_genus_num_not_other
+fecal.qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+fecal.col_vector_pre = unlist(mapply(brewer.pal, fecal.qual_col_pals$maxcolors, rownames(fecal.qual_col_pals)))
+fecal.col_vector <- fecal.col_vector_pre[1:fecal.n]
+#We also order the display genera such that other is on the end 
+fecal.gen$DisplayGenus <- factor(fecal.gen$DisplayGenus, levels=c(fecal.new_genus_un_not_other, "Other"),)
+
+#Now we generate the stacked barplot
+fecal.ab_plot <- ggplot(data = fecal.gen,
+                        mapping = aes(x = StudyID, y = as.numeric(Abundance), fill = DisplayGenus)) +
+  geom_bar(position="fill", stat="identity")+
+  labs(y="Relative Abundance", fill="Genus")+
+  theme_classic() +
+  scale_fill_manual(
+    values = c(fecal.col_vector, "gray"),
+    breaks = c(fecal.new_genus_un_not_other, "Other"),
+    labels = c(fecal.new_genus_un_not_other, "Other")
+  ) +
+  theme(legend.position = "right",
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=9),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  guides(fill = guide_legend(ncol = 2))+
+  facet_nested(rows=vars(Timepoint),
+               cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")), Diet), 
+               scales="free",
+               space="free_x")
+
+
+
+
+
+```
+
+
+####Enterotypes
+
+#####Optimal Number
+```{r}
+
+
+
+
+pam.res.2 <- pam(clr_count_data_trans, 2)
+
+pam.res.4 <- pam(clr_count_data_trans, 4) 
+
+cluster_assign_2 <- as.data.frame(pam.res.2$clustering)
+cluster_assign_4 <- as.data.frame(pam.res.4$clustering)
+colnames(cluster_assign_2) <- "Cluster"
+colnames(cluster_assign_4) <- "Cluster"
+
+
+```
+
+#####Abundances
+```{r}
+
+```
+
+
+
+####Ordination
+
+```{r}
+
+fecal.WU.pc.data <- cbind(fecal.wu.biplot[["data"]][["Vectors"]],fecal.tax.plot.data@sam_data)
+
+fecal.WU.contrib <-fecal.wu.biplot[["data"]][["Species"]]
+fecal.top_10_features <- fecal.WU.contrib %>%
+  rowwise() %>%
+  mutate(contribution = sqrt(PC1^2 + PC2^2)) %>%
+  arrange(desc(contribution)) %>%
+  slice(1:10)
+fecal.top_10_features$Genus <- "Unclassified"
+fecal.top_10_features$Family <- "Family"
+
+fecal.tax <- as.data.frame(fecal.tax.plot.data@tax_table)
+
+for (k in 1:nrow(fecal.top_10_features)) {
+  feat.k <- fecal.top_10_features$FeatureID[k]
+  fecal.gen <- fecal.tax$Genus[which(rownames(fecal.tax)==feat.k)]
+  fecal.top_10_features$Genus[k] <- fecal.gen
+  fecal_tax.fam <- fecal.tax$Family[which(rownames(fecal.tax)==feat.k)]
+  fecal.top_10_features$Family[k] <- fecal_tax.fam
+}
+
+
+fecal.top_ten <- fecal.top_10_features[which(fecal.top_10_features$contribution>0.057),]
+fecal.WU.pc.data$Diet.Timepoint <- paste0(fecal.WU.pc.data$Diet," - ",fecal.WU.pc.data$Timepoint)  
+
+fecal.WU.pc.data.filt <- fecal.WU.pc.data[which(fecal.WU.pc.data$Diet.Timepoint!="NA - NA"),]
+
+fecalWU_plot <- ggplot() + 
+              geom_line(data = fecal.WU.pc.data.filt, alpha=.4, aes(x = as.numeric(PC1), y = as.numeric(PC2), group=StudyID))+
+            geom_point(data = fecal.WU.pc.data.filt, size=4, aes(x = as.numeric(PC1), y = as.numeric(PC2), color=fecal.WU.pc.data.filt$Diet.Timepoint))+
+  stat_ellipse(geom="polygon",
+                         aes(x = as.numeric(bd_prcomp_res_met_filt$PC1), y = as.numeric(bd_prcomp_res_met_filt$PC2),fill=bd_prcomp_res_met_filt$Diet.Timepoint),
+                         alpha=0.25)+
+              scale_fill_manual(values = c("lightgreen","darkgreen","yellow","darkorange"), name="Diet.Timepoint")+
+            scale_color_manual(values = c("palegreen", "limegreen", "darkgreen", "orange", "orange3", "orange4"), name="Diet-Timepoint")+
+            labs(x=paste0("PCo1 (",round(fecal.wu.biplot[["data"]][["ProportionExplained"]][1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(fecal.wu.biplot[["data"]][["ProportionExplained"]][2]*100, digits = 1),"%)"), key=" ", title="PCoA of Fecal Microbiome Data", tag="A")+
+            guides(color=guide_legend(nrow=3,bycol=TRUE))+
+                geom_segment(data = fecal.top_ten, aes(x = 0, y = 0, xend = 2*PC1, yend = 2*PC2),
+               arrow = arrow(length = unit(0.3, "cm")), color = "red") +
+    geom_label_repel(data = fecal.top_ten, aes(x = 2*PC1, y =2*PC2, label = Genus),color = "red", max.overlaps = 100) +
+            theme_bw()+
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+
+
+```
+
+####Deltas
+
+
+
+
+
+
+
+###Biopsy Analysis
+
+
+Now we do the same analysis on Biopsy samples
+
+####Initial Filtration
+```{r}
+
+#We set to the parent directory
+setwd("../..")
+
+#We pull the unrarified data to get which ever had more reads before rarefication
+biopsy_samps_unrarified <- qiime2R::qza_to_phyloseq(features="Data/QIIME_Files/Biopsy/filtered-feature-table.qza",
+                                      taxonomy="Data/QIIME_Files/Biopsy/gg-taxonomy.qza",
+                                      metadata="Data/QIIME_Files/Biopsy/Metadata/allmetadata.txt")
+
+#Now we pull the sums from the OTU table and adjoin it to the sample data
+biopsy_sam_counts <- cbind(biopsy_samps_unrarified@sam_data, rowSums(t(biopsy_samps_unrarified@otu_table)))
+#We now change the name of the final column
+colnames(biopsy_sam_counts)[ncol(biopsy_sam_counts)] <- "Total_Reads"
+
+#Now we pull only sample in which the total counts are the max (only selecting samples with the most counts)
+biopsy_sam_counts_max <- biopsy_sam_counts %>%
+                          group_by(sample) %>% 
+                          filter(Total_Reads==max(Total_Reads))
+
+#We now filter the data such that the 
+
+biopsy.tax.plot.data.filt <- subset_samples(biopsy.tax.plot.data, orig_sampleid %in% biopsy_sam_counts_max$orig_sampleid) 
+
+biopsy.shannon.filt <- biopsy.shannon[which(rownames(biopsy.shannon) %in% rownames(biopsy.tax.plot.data.filt@sam_data)),]
+
+biopsy.faith.filt <- biopsy.faith[which(rownames(biopsy.faith) %in% rownames(biopsy.tax.plot.data.filt@sam_data)),]
+
+```
+
+
+####Alpha Diversity
+
+Alpha diversity is Assessed
+
+#####Shannon
+```{r}
+
+###The StudyID and Timepoint are appended to the shannon diversity
+biopsy.tax.plot.data.filt@sam_data$StudyID.Timepoint <- paste0(biopsy.tax.plot.data.filt@sam_data$StudyID,"-",biopsy.tax.plot.data.filt@sam_data$TimepointNumeric)
+biopsy.shannon_met <- cbind(biopsy.tax.plot.data.filt@sam_data[,c("StudyID.Timepoint")],biopsy.shannon.filt)
+colnames(biopsy.shannon_met)[2]<-"Shannon_Diversity"
+
+###The clinical data is added
+biopsy.shannon_clin <- inner_join(biopsy.shannon_met, clin, by="StudyID.Timepoint")
+
+####Normality is assessed
+biopsy.shannon.shapiro <- shapiro_test(biopsy.shannon_clin$Shannon_Diversity)
+if (biopsy.shannon.shapiro$p.value<0.05) {
+  print("Biopsy Shannon Diversity is NOT normally distributed")
+} else {
+  print("Biopsy Shannon Diversity is normally distributed")
+}
+###We assess differences by group 
+biopsy.shannon_gp_stats <- gp_stat_sum(data=biopsy.shannon_clin,
+                                sub_vars=c("Timepoint"),
+                                dep_vars="Shannon_Diversity",
+                                gp_var="Group",
+                                normality=FALSE,
+                                adj="bonferroni")
+
+####Shannonn IQRs are pulled
+biopsy.shannon.iqr <- biopsy.shannon_clin %>% 
+                        group_by(Group,Timepoint) %>% 
+                        summarise(median=median(Shannon_Diversity), 
+                                  percentile_25 = quantile(Shannon_Diversity, 0.25),
+                                  percentile_75 = quantile(Shannon_Diversity, 0.75)
+                                  )
+
+###We assess changes longitudinally 
+biopsy.shannon_long_stats <- long_stat_sum(data=biopsy.shannon_clin,
+                                sub_vars=c("Diet"),
+                                tm_var="Timepoint",
+                                dep_vars="Shannon_Diversity",
+                                rand_var="StudyID",
+                                normality=FALSE,
+                                adj="bonferroni",
+                                pw="separate")
+
+
+```
+
+#####Faith's
+```{r}
+
+###The StudyID and Timepoint are appended to the shannon diversity
+
+biopsy.intersect_rownames <- intersect(rownames(biopsy.tax.plot.data.filt@sam_data),rownames(biopsy.faith))
+
+biopsy.faith_met <- cbind(biopsy.tax.plot.data.filt@sam_data[biopsy.intersect_rownames,c("StudyID.Timepoint")],biopsy.faith.filt)
+
+colnames(biopsy.faith_met)[2]<-"Faith_Diversity"
+
+###The clinical data is added
+biopsy.faith_clin <- inner_join(biopsy.faith_met, clin, by="StudyID.Timepoint")
+
+
+####Normality is assessed
+biopsy.faith.shapiro <- shapiro_test(biopsy.faith_clin$Faith_Diversity)
+if (biopsy.faith.shapiro$p.value<0.05) {
+  print("Biopsy Faith Diversity is NOT normally distributed")
+} else {
+  print("Biopsy Faith Diversity is normally distributed")
+}
+###We assess differences by group 
+biopsy.faith_gp_stats <- gp_stat_sum(data=biopsy.faith_clin,
+                                sub_vars=c("Timepoint"),
+                                dep_vars="Faith_Diversity",
+                                gp_var="Group",
+                                normality=FALSE,
+                                adj="bonferroni")
+
+####Shannonn IQRs are pulled
+biopsy.faith.iqr <- biopsy.faith_clin %>% 
+                        group_by(Group,Timepoint) %>% 
+                        summarise(median=median(Faith_Diversity), 
+                                  percentile_25 = quantile(Faith_Diversity, 0.25),
+                                  percentile_75 = quantile(Faith_Diversity, 0.75)
+                                  )
+
+###We assess changes longitudinally 
+biopsy.faith_long_stats <- long_stat_sum(data=biopsy.faith_clin,
+                                sub_vars=c("Diet"),
+                                tm_var="Timepoint",
+                                dep_vars="Faith_Diversity",
+                                rand_var="StudyID",
+                                normality=FALSE,
+                                adj="bonferroni",
+                                pw="separate")
+
+
+
+```
+
+
+
+####Combined Plots
+
+```{r}
+fecal.shannon_long_stats$SampleType <- "Feces"
+fecal.faith_long_stats$SampleType <- "Feces"
+fecal.shannon_long_stats$Type <- "Shannon"
+fecal.faith_long_stats$Type <- "Faith's"
+
+biopsy.shannon_long_stats$SampleType <- "Biopsy"
+biopsy.faith_long_stats$SampleType <- "Biopsy"
+biopsy.shannon_long_stats$Type <- "Shannon"
+biopsy.faith_long_stats$Type <- "Faith's"
+
+fecal.shannon_clin$SampleType <- "Feces"
+fecal.shannon_clin$Type <- "Shannon"
+fecal.faith_clin$SampleType <- "Feces"
+fecal.faith_clin$Type <- "Faith's"
+
+biopsy.shannon_clin$SampleType <- "Biopsy"
+biopsy.shannon_clin$Type <- "Shannnon"
+biopsy.faith_clin$SampleType <- "Biopsy"
+biopsy.faith_clin$Type <- "Faith's"
+
+colnames(fecal.shannon_clin)[2] <- "Diversity"
+colnames(fecal.faith_clin)[2] <- "Diversity"
+colnames(biopsy.shannon_clin)[2] <- "Diversity"
+colnames(biopsy.faith_clin)[2] <- "Diversity"
+
+include_vars <- intersect(intersect(colnames(fecal.shannon_clin),colnames(fecal.faith_clin)),intersect(colnames(biopsy.shannon_clin),colnames(biopsy.faith_clin)))
+all_diversity_stats <- rbind(fecal.shannon_long_stats, fecal.faith_long_stats,biopsy.shannon_long_stats, biopsy.faith_long_stats)
+all_diversity_data <- rbind(fecal.shannon_clin[,which(colnames(fecal.shannon_clin) %in% include_vars)], fecal.faith_clin[,which(colnames(fecal.faith_clin) %in% include_vars)], biopsy.shannon_clin[,which(colnames(biopsy.shannon_clin) %in% include_vars)], biopsy.faith_clin[,which(colnames(biopsy.faith_clin) %in% include_vars)])
+all_diversity_stats$Timepoint <- all_diversity_stats$group2
+
+
+alpha_div_plot <- ggplot(data = all_diversity_data,
+                      mapping = aes(x = Timepoint, y = as.numeric(Diversity), fill = Diet)) +
+              geom_violin() +
+              geom_line(mapping = aes(group = StudyID),
+                position = position_dodge(0.1),
+                alpha = .5,
+                size=1) +
+              geom_point(mapping = aes(fill = Diet, group = StudyID),
+                size = 2, shape = 21,
+                position = position_dodge(0.1)) +
+              scale_fill_manual(values=c("darkgreen","darkorange"))+
+              labs(y="Alpha Diverisity")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=15),
+                strip.text.y = element_text(size=15),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+                stat_pvalue_manual(
+                  all_diversity_stats,
+                  label = "p.signif",
+                  hide.ns = TRUE,
+                  y.position = c(8)
+                ) +
+                facet_nested(cols=vars(SampleType,Type),
+                  rows=vars(Diet), 
+                  scales="free_y",
+                  independent = "y")
+
+```
+
+
+###Ordination
+```{r}
+
+biopsy.WU.pc.data <- cbind(biopsy.wu.biplot[["data"]][["Vectors"]],biopsy.tax.plot.data@sam_data)
+
+biopsy.WU.contrib <-biopsy.wu.biplot[["data"]][["Species"]]
+biopsy.top_10_features <- biopsy.WU.contrib %>%
+  rowwise() %>%
+  mutate(contribution = sqrt(PC1^2 + PC2^2)) %>%
+  arrange(desc(contribution)) %>%
+  slice(1:10)
+biopsy.top_10_features$Genus <- "Unclassified"
+biopsy.top_10_features$Family <- "Family"
+
+biopsy.tax <- as.data.frame(biopsy.tax.plot.data@tax_table)
+
+for (k in 1:nrow(biopsy.top_10_features)) {
+  feat.k <- biopsy.top_10_features$FeatureID[k]
+  biopsy_tax.gen <- biopsy.tax$Genus[which(rownames(biopsy.tax)==feat.k)]
+  biopsy.top_10_features$Genus[k] <- biopsy_tax.gen
+  biopsy_tax.fam <- biopsy.tax$Family[which(rownames(biopsy.tax)==feat.k)]
+  biopsy.top_10_features$Family[k] <- biopsy_tax.fam
+}
+
+
+biopsy.top_ten <- biopsy.top_10_features[which(biopsy.top_10_features$contribution>0.027),]
+biopsy.WU.pc.data$Diet.Timepoint <- paste0(biopsy.WU.pc.data$Diet," - ",biopsy.WU.pc.data$Timepoint)  
+
+biopsy.WU.pc.data.filt <- biopsy.WU.pc.data[which(biopsy.WU.pc.data$Diet.Timepoint!="NA - NA" & biopsy.WU.pc.data$SampleID %in% rownames(biopsy.tax.plot.data.filt@sam_data)),]
+biopsyWU_plot <- ggplot() + 
+geom_line(data = biopsy.WU.pc.data.filt, alpha=.4, aes(x = as.numeric(PC1), y = as.numeric(PC2), group=StudyID))+
+            geom_point(data = biopsy.WU.pc.data.filt, size=4, aes(x = as.numeric(PC1), y = as.numeric(PC2), color=biopsy.WU.pc.data.filt$Diet.Timepoint))+
+            scale_color_manual(values = c("palegreen", "limegreen", "darkgreen", "orange", "orange3", "orange4"), name="Diet-Timepoint")+
+            labs(x=paste0("PCo1 (",round(biopsy.wu.biplot[["data"]][["ProportionExplained"]][1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(biopsy.wu.biplot[["data"]][["ProportionExplained"]][2]*100, digits = 1),"%)"), key=" ", title="PCoA of Biopsy Microbiome Data", tag="B")+
+            guides(color=guide_legend(nrow=3,bycol=TRUE))+
+    geom_segment(data = biopsy.top_ten, aes(x = 0, y = 0, xend = 15*PC1, yend = 15*PC2),
+               arrow = arrow(length = unit(0.3, "cm")), color = "red") +
+    geom_label_repel(data = biopsy.top_ten, aes(x = 15*PC1, y= 15*PC2, label = Genus),color = "red", max.overlaps = 100) +
+            theme_bw()+
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+
+ggarrange(fecalWU_plot,biopsyWU_plot,common.legend = TRUE, legend="bottom")
+
+####ANCOMBC
+#####Differential Abundance at Baseline
+
+```{r}
+#Baseline
+biopsy.t1.data <- subset_samples(biopsy.tax.plot.data.filt, Timepoint == "T1") 
+biopsy.msm.data <- subset_samples(biopsy.t1.data, MSM_status == "MSM")
+biopsy.hivn.data <- subset_samples(biopsy.t1.data, HIV_Status == "Negative")
+biopsy.hiv_diff <- ancombc2(
+  data = biopsy.msm.data, 
+  tax_level = 'Genus',
+  fix_formula = 'HIV_Status',
+  p_adj_method="bonferroni"
+)
+biopsy.msm_diff <- ancombc2(
+  data = biopsy.hivn.data, 
+  tax_level = 'Genus',
+  fix_formula = 'MSM_status',
+  p_adj_method="bonferroni"
+)
+
+
+```
+
+#####Changes on Agrarian
+
+```{r}
+#Baseline
+biopsy.ag.data <- subset_samples(biopsy.tax.plot.data.filt, Diet == "Agrarian") 
+biopsy.ag_diff <- ancombc2(
+  data = biopsy.ag.data, 
+  tax_level = 'Genus',
+  fix_formula = 'TimepointNumeric',
+  p_adj_method="fdr",
+  rand_formula = '(1 | StudyID)'
+)
+
+
+#Baseline
+biopsy.ag.data.hivmsm <- subset_samples(biopsy.tax.plot.data.filt, Diet == "Agrarian" & Group=="HIV(+)MSM") 
+biopsy.ag_diff.hivmsm <- ancombc2(
+  data = biopsy.ag.data.hivmsm, 
+  tax_level = 'Genus',
+  fix_formula = 'TimepointNumeric',
+  p_adj_method="fdr",
+  rand_formula = '(1 | StudyID)'
+)
+
+#model by standard agrarian
+
+
+```
+
+###Combined Baseline Differences
+```{r}
+
+###Fecal HIV
+fecal.hiv.volc.data <- as.data.frame(fecal.hiv_diff$res)
+
+fecal.hiv.volc.data$SigLabel <- "Insignificant"
+fecal.hiv.volc.data$SigLabel[fecal.hiv.volc.data$lfc_HIV_StatusPositive>0 & fecal.hiv.volc.data$q_HIV_StatusPositive<0.05] <- "Increased in HIV"
+fecal.hiv.volc.data$SigLabel[fecal.hiv.volc.data$lfc_HIV_StatusPositive<0 & fecal.hiv.volc.data$q_HIV_StatusPositive<0.05] <- "Decreased in HIV"
+
+fecal.hiv.volc.data$PlotLabel <- ""
+fecal.hiv.volc.data$PlotLabel[fecal.hiv.volc.data$q_HIV_StatusPositive<0.05] <- fecal.hiv.volc.data$taxon[fecal.hiv.volc.data$q_HIV_StatusPositive<0.05]
+
+fecal.hiv.volc.data$Log10padj <- -1*log10(fecal.hiv.volc.data$q_HIV_StatusPositive)
+fecal_hiv_baseline_plot <- ggplot(data=fecal.hiv.volc.data, aes(x=lfc_HIV_StatusPositive,y=Log10padj, color=SigLabel))+
+                      geom_point(size=3)+
+                      geom_text_repel(data=fecal.hiv.volc.data, aes(x=lfc_HIV_StatusPositive,y=Log10padj, label=PlotLabel))+
+                      scale_color_manual(values=c("blue","red","gray"))+
+                      labs(x="LFC",y="-log10(padj)", color=" ", tag="A")+
+                      theme_classic() +
+                      theme(legend.position = "bottom",
+                            legend.title = element_text(size = 15),
+                            legend.text = element_text(size = 10),
+                            axis.text.x = element_text(size = 15),
+                            axis.title.y = element_text(size = 15),
+                            axis.title.x = element_text(size=15),
+                            axis.text.y = element_text(size = 15),
+                            strip.text.x = element_text(size=15),
+                            strip.text.y = element_text(size=15),
+                            plot.tag = element_text(size=20))
+  
+######Fecal MSM
+fecal.msm.volc.data <- as.data.frame(fecal.msm_diff$res)
+
+fecal.msm.volc.data$SigLabel <- "Insignificant"
+fecal.msm.volc.data$SigLabel[fecal.msm.volc.data$lfc_MSM_statusMSW>0 & fecal.msm.volc.data$q_MSM_statusMSW<0.05] <- "Decreased in MSM"
+fecal.msm.volc.data$SigLabel[fecal.msm.volc.data$lfc_MSM_statusMSW<0 & fecal.msm.volc.data$q_MSM_statusMSW<0.05] <- "Increased in MSM"
+
+fecal.msm.volc.data$PlotLabel <- ""
+fecal.msm.volc.data$PlotLabel[fecal.msm.volc.data$q_MSM_statusMSW<0.05] <- fecal.msm.volc.data$taxon[fecal.msm.volc.data$q_MSM_statusMSW<0.05]
+
+fecal.msm.volc.data$Log10padj <- -1*log10(fecal.msm.volc.data$q_MSM_statusMSW)
+fecal.msm.volc.data$lfc_MSM_statusMSM <- -1*(fecal.msm.volc.data$lfc_MSM_statusMSW)
+
+fecal_msm_baseline_plot <- ggplot(data=fecal.msm.volc.data, aes(x=lfc_MSM_statusMSM,y=Log10padj, color=SigLabel))+
+                      geom_point(size=3)+
+                      scale_color_manual(values=c("red","gray"))+
+                     geom_text_repel(data=fecal.msm.volc.data, aes(x=lfc_MSM_statusMSM,y=Log10padj, label=PlotLabel))+
+                      labs(x="LFC",y="-log10(padj)", color=" ", tag="B")+
+                      theme_classic() +
+                      theme(legend.position = "bottom",
+                            legend.title = element_text(size = 15),
+                            legend.text = element_text(size = 10),
+                            axis.text.x = element_text(size = 15),
+                            axis.title.y = element_text(size = 15),
+                            axis.title.x = element_text(size=15),
+                            axis.text.y = element_text(size = 15),
+                            strip.text.x = element_text(size=15),
+                            strip.text.y = element_text(size=15),
+                            plot.tag = element_text(size=20))
+
+
+
+###biopsy HIV
+biopsy.hiv.volc.data <- as.data.frame(biopsy.hiv_diff$res)
+
+biopsy.hiv.volc.data$SigLabel <- "Insignificant"
+biopsy.hiv.volc.data$SigLabel[biopsy.hiv.volc.data$lfc_HIV_StatusPositive>0 & biopsy.hiv.volc.data$q_HIV_StatusPositive<0.05] <- "Increased in HIV"
+biopsy.hiv.volc.data$SigLabel[biopsy.hiv.volc.data$lfc_HIV_StatusPositive<0 & biopsy.hiv.volc.data$q_HIV_StatusPositive<0.05] <- "Decreased in HIV"
+
+biopsy.hiv.volc.data$PlotLabel <- ""
+biopsy.hiv.volc.data$PlotLabel[biopsy.hiv.volc.data$q_HIV_StatusPositive<0.05] <- biopsy.hiv.volc.data$taxon[biopsy.hiv.volc.data$q_HIV_StatusPositive<0.05]
+
+biopsy.hiv.volc.data$Log10padj <- -1*log10(biopsy.hiv.volc.data$q_HIV_StatusPositive)
+biopsy_hiv_baseline_plot <- ggplot(data=biopsy.hiv.volc.data, aes(x=lfc_HIV_StatusPositive,y=Log10padj, color=SigLabel))+
+  geom_point(size=3)+
+  geom_text_repel(data=biopsy.hiv.volc.data, aes(x=lfc_HIV_StatusPositive,y=Log10padj, label=PlotLabel))+
+  scale_color_manual(values=c("blue","red","gray"))+
+  labs(x="LFC",y="-log10(padj)", color=" ", tag="B")+
+  theme_classic() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size=15),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        plot.tag = element_text(size=20))
+
+######biopsy MSM
+biopsy.msm.volc.data <- as.data.frame(biopsy.msm_diff$res)
+
+biopsy.msm.volc.data$SigLabel <- "Insignificant"
+biopsy.msm.volc.data$SigLabel[biopsy.msm.volc.data$lfc_MSM_statusMSW>0 & biopsy.msm.volc.data$q_MSM_statusMSW<0.05] <- "Decreased in MSM"
+biopsy.msm.volc.data$SigLabel[biopsy.msm.volc.data$lfc_MSM_statusMSW<0 & biopsy.msm.volc.data$q_MSM_statusMSW<0.05] <- "Increased in MSM"
+
+biopsy.msm.volc.data$PlotLabel <- ""
+biopsy.msm.volc.data$PlotLabel[biopsy.msm.volc.data$q_MSM_statusMSW<0.05] <- biopsy.msm.volc.data$taxon[biopsy.msm.volc.data$q_MSM_statusMSW<0.05]
+
+biopsy.msm.volc.data$Log10padj <- -1*log10(biopsy.msm.volc.data$q_MSM_statusMSW)
+biopsy.msm.volc.data$lfc_MSM_statusMSM <- -1*(biopsy.msm.volc.data$lfc_MSM_statusMSW)
+
+biopsy_msm_baseline_plot <- ggplot(data=biopsy.msm.volc.data, aes(x=lfc_MSM_statusMSM,y=Log10padj, color=SigLabel))+
+  geom_point(size=3)+
+  geom_text_repel(data=biopsy.msm.volc.data, aes(x=lfc_MSM_statusMSM,y=Log10padj, label=PlotLabel))+
+  scale_color_manual(values=c("blue","red","gray"))+
+  labs(x="LFC",y="-log10(padj)", color=" ", tag="D")+
+  theme_classic() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_text(size=15),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        plot.tag = element_text(size=20))
+
+
+
+test_ab <- fecal.gen[which(fecal.gen$TimepointNumeric==1 & fecal.gen$Genus=="Aggregatibacter" & fecal.gen$MSM_status=="MSM"),]
+
+test_plot <- ggplot(data = test_ab,
+                      mapping = aes(x = HIV_Status, y = as.numeric(Abundance))) +
+              geom_violin()+
+            scale_y_log10()
+
+baseline_volc <- ggarrange(fecal_hiv_baseline_plot,biopsy_hiv_baseline_plot, nrow=1, ncol=2)
+```
+
+
+###Abundance plot 
+```{r}
+biopsy.gen <- prep_mdf(biopsy.tax.plot.data.filt, subgroup_level="Species")
+biopsy.gen["SampleType"] <- "Biopsy"
+
+fecal.gen <- prep_mdf(fecal.tax.plot.data, subgroup_level="Species")
+fecal.gen["SampleType"] <- "Fecal"
+
+```
+
+
+####Absorbance Plot
+
+```{r}
+
+all.gen.cols <- intersect(colnames(biopsy.gen),colnames(fecal.gen))
+all.gen <- rbind(biopsy.gen[,all.gen.cols],fecal.gen[,all.gen.cols])
+
+
+for (r in 1:nrow(all.gen)) {
+  if(is.na(all.gen$Genus[r])) {
+    all.gen$Genus[r] <- paste0("Unclassified ", all.gen$Family[r])
+  }
+}
+
+all.gen["Group"] <- ""
+for (j in 1:nrow(all.gen)) {
+  stud_j <- all.gen$StudyID[j]
+  gp_j <- clin$Group[which(clin$StudyID==stud_j)]
+  if (length(gp_j>0)) {
+    all.gen$Group[j] <- gp_j
+  } else {
+    all.gen$Group[j] <- "Other"
+  }
+}
+
+all.gen["NewGenus"] <- ""
+
+max_data_temp <- all.gen %>%
+      group_by(Genus) %>%
+      summarise(med = median(as.numeric(Abundance))) %>%
+      arrange(desc(med))
+names_inc <- max_data_temp$Genus[1:39]
+
+
+for (n in 1:nrow(all.gen)) {
+  if (all.gen$Genus[n] %in% names_inc) {
+    all.gen$NewGenus[n] <- all.gen$Genus[n]
+  } else {
+    all.gen$NewGenus[n] <- "Other"
+  }
+  if (is.na(all.gen$NewGenus[n]) | all.gen$NewGenus[n]=="Unclassified NA") {
+    all.gen$NewGenus[n] <- "Other"
+  }
+}
+
+
+
+
+
+
+new_genus_un <- unique(all.gen$NewGenus)
+new_genus_num <- length(new_genus_un)
+new_genus_un_not_other <- setdiff(new_genus_un, "Other")
+new_genus_num_not_other <-new_genus_num-1  
+
+n <- new_genus_num_not_other
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+col_vector_pre = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+col_vector <- col_vector_pre[1:n]
+
+all.gen$NewGenus <- factor(all.gen$NewGenus, levels=c(new_genus_un_not_other, "Other"),)
+
+all.gen.filt <- all.gen[which(!is.na(all.gen$Timepoint)),]
+all.ab_plot <- ggplot(data = all.gen.filt,
+                        mapping = aes(x = StudyID, y = as.numeric(Abundance), fill = NewGenus)) +
+  geom_bar(position="fill", stat="identity")+
+  labs(y="Relative Abundance", fill="Genus")+
+  theme_classic() +
+  scale_fill_manual(
+    values = c(col_vector, "gray"),
+    breaks = c(new_genus_un_not_other, "Other"),
+    labels = c(new_genus_un_not_other, "Other")
+  ) +
+  theme(legend.position = "right",
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=9),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  guides(fill = guide_legend(ncol = 1))+
+  facet_nested(rows=vars(SampleType,Timepoint),
+               cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")), Diet), 
+               scales="free_x")
+
+
+biop_all.gen.filt <- all.gen.filt[which(all.gen.filt$SampleType=="Biopsy"),]
+fecal_all.gen.filt <- all.gen.filt[which(all.gen.filt$SampleType=="Fecal"),]
+
+fecal_all.ab_plot <- ggplot(data = fecal_all.gen.filt,
+                        mapping = aes(x = StudyID, y = as.numeric(Abundance), fill = NewGenus)) +
+  geom_bar(position="fill", stat="identity")+
+  labs(y="Relative Abundance", fill="Genus", tag="A")+
+  theme_classic() +
+  scale_fill_manual(
+    values = c(col_vector, "gray"),
+    breaks = c(new_genus_un_not_other, "Other"),
+    labels = c(new_genus_un_not_other, "Other")
+  ) +
+  theme(legend.position = "right",
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=9),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  guides(fill = guide_legend(ncol = 5))+
+  facet_nested(rows=vars(SampleType,Timepoint),
+               cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")), Diet), 
+               scales="free_x")
+
+biop_all.ab_plot <- ggplot(data = biop_all.gen.filt,
+                        mapping = aes(x = StudyID, y = as.numeric(Abundance), fill = NewGenus)) +
+  geom_bar(position="fill", stat="identity")+
+  labs(y="Relative Abundance", fill="Genus", tag="B")+
+  theme_classic() +
+  scale_fill_manual(
+    values = c(col_vector, "gray"),
+    breaks = c(new_genus_un_not_other, "Other"),
+    labels = c(new_genus_un_not_other, "Other")
+  ) +
+  theme(legend.position = "right",
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        axis.text.x = element_blank(),
+        axis.title.y = element_text(size = 15),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=9),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  guides(fill = guide_legend(ncol = 5))+
+  facet_nested(rows=vars(SampleType,Timepoint),
+               cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")), Diet), 
+               scales="free_x")
+
+all_plot <- ggarrange(fecal_all.ab_plot, biop_all.ab_plot, common.legend = TRUE, legend="bottom")
+
+```
+
+
+###Alphadiversity combined
+```{r}
+fecal.shannon_long_stats$SampleType <- "Feces"
+biopsy.shannon_long_stats$SampleType <- "Biopsy"
+
+fecal.shannon_clin$SampleType <- "Feces"
+biopsy.shannon_clin$SampleType <- "Biopsy"
+
+all_shannon <- rbind(fecal.shannon_clin,biopsy.shannon_clin)
+all_shannon_stats <- rbind(fecal.shannon_long_stats, biopsy.shannon_long_stats)
+
+
+shannon_viol <- ggplot(data = all_shannon,
+                      mapping = aes(x = Timepoint, y = as.numeric(Shannon_Diversity), fill = Diet)) +
+              geom_violin() +
+              geom_line(mapping = aes(group = StudyID),
+                position = position_dodge(0.1),
+                alpha = 1,
+                size=1) +
+              geom_point(mapping = aes(fill = Diet, group = StudyID),
+                size = 2, shape = 21,
+                position = position_dodge(0.1)) +
+              scale_fill_manual(values=c("darkgreen","darkorange"))+
+              labs(y="Shannon Diversity")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+                facet_nested(cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),Diet),
+                             rows=vars(factor(SampleType, levels=c("Feces","Biopsy"))),
+                  scales="free_y")
+```
+
+
+##R_Output
+
+Output for Jennifer on 070224
+
+```{r}
+setwd("../..")
+
+#First we need to prep the mdf_object 
+fecal.gen <- prep_mdf(fecal.tax.plot.data, subgroup_level="Genus", as_relative_abundance=FALSE)
+
+fecal.gen.sum.long <- fecal.gen %>% 
+                  group_by(StudyID.Timepoint,Genus) %>%
+                  summarise(count=sum(Abundance))
+fecal.gen.sum.wide <- pivot_wider(fecal.gen.sum.long,
+                                  id_cols=StudyID.Timepoint,
+                                  values_from = count,
+                                  names_from=Genus)
+
+write.csv(fecal.gen.sum.wide, file="Data/Exported_from_R/Fecal_Micorbiome_070224.csv")
+
+#First we need to prep the mdf_object 
+biopsy.gen <- prep_mdf(biopsy.tax.plot.data.filt , subgroup_level="Genus", as_relative_abundance=FALSE)
+
+biopsy.gen$StudyID.Timepoint <- paste0(biopsy.gen$StudyID,"-", biopsy.gen$TimepointNumeric)
+biopsy.gen.sum.long <- biopsy.gen %>% 
+                  group_by(StudyID.Timepoint,Genus) %>%
+                  summarise(count=sum(Abundance))
+biopsy.gen.sum.wide <- pivot_wider(biopsy.gen.sum.long,
+                                  id_cols=StudyID.Timepoint,
+                                  values_from = count,
+                                  names_from=Genus)
+
+write.csv(biopsy.gen.sum.wide, file="Data/Exported_from_R/Biopsy_Micorbiome_070224.csv")
+
+
+
+```

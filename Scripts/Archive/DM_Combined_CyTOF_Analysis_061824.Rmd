@@ -1,0 +1,582 @@
+---
+title: "DM Blood CyTOF ANalysis"
+author: "J. O'Connor"
+date: "2023-10-30"
+output: html_document
+---
+
+## R Baseline Data Analysis
+
+This is an R Markdown document that includes the R analysis for the study population baseline data.
+
+### Initial Data Loading and Preprocessing
+
+The initial data is loaded
+
+
+```{r}
+# The Working Directory is Set
+setwd("..")
+
+#Initial Libraries are loaded
+
+library(compositions) #Version
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(ggfortify)
+library(ggpubr)
+library(stringr)
+library(ggrepel)
+library(mice)
+library(vegan)
+library(ape)
+library(ggpubr)
+library(rstatix)
+library(cowplot)
+library(pheatmap)
+library(randomForest)
+library(VSURF)
+library(ggplot2)
+library (ggpubr)
+library(tidyr)
+library(reshape2)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(factoextra)
+library(httr)
+library(jsonlite)
+library(stringr)
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(afex)
+library(phyloseq)
+library(qiime2R)
+library(vegan)
+library(ape)
+library(ggpubr)
+library(rstatix)
+library(cowplot)
+library(gridExtra)
+library(ggpubr)
+library(jsonlite)
+library(qiime2R)
+library(phyloseq)
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(afex)
+library(microbiome)
+library(microshades)
+library(speedyseq)
+library(compositions) 
+library(tidyr)
+library(ggforce)
+library(ggh4x)
+library(RColorBrewer)
+library(pheatmap)
+library(ggrepel)
+library(EnhancedVolcano)
+library(mice)
+library(biomformat)
+library(glmmLasso)
+library(stats)
+library(ggplot2)
+
+
+# Necessary Functions are Sourced 
+function_files <- list.files(paste0(getwd(),"/Functions"), pattern = "\\.R$", full.names = TRUE)
+lapply(function_files, source)
+
+# Metadata is pulled in from an excel file
+metadata <- read_xlsx("Data/Metadata/metadata.xlsx")
+
+####Manual MSM edits #####
+
+#Based on individual manual characterizations we altered some unknown MSM statuses
+#Below is the table with the specified MSM statuses
+MSM_spec <- rbind(c("DM001", "MSM", "MSM"),
+                  c("DM002", "MSM", "MSM"),
+                  c("DM007", "MSM", "MSM"),
+                  c("DM010", "MSM", "MSM"),
+                  c("DM021", "MSW", "NonMSM"),
+                  c("DM093", "MSW", "NonMSM"),
+                  c("DM046", "MSM", "MSM"))
+#We name the columns to match the clinical data set
+colnames(MSM_spec) <- c("StudyID", "MSM_status", "MSM_status2")
+MSM_spec <- as.data.frame(MSM_spec)
+
+#We then go through the metadata and manually adjust the avlues
+for (j in 1:nrow(metadata)) {
+  #Is the study ID is in the table we change the values
+  if (metadata$StudyID[j] %in% MSM_spec$StudyID) {
+    MSM_status_j <- unique(MSM_spec$MSM_status[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    MSM_status2_j <- unique(MSM_spec$MSM_status2[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    metadata$MSM_status[j] <-MSM_status_j 
+    metadata$MSM_status2[j] <-MSM_status2_j 
+  }
+}
+#We create simpler names for the fields of interest
+metadata["MSM"] <- metadata$MSM_status2
+metadata["HIV"] <- paste0("HIV-",metadata$HIV_Status)
+metadata["Age"] <- as.numeric((metadata$DateOfVisit-metadata$DOB)/365.25)
+#We adjust rownames to be consistent (studyID combined with the timepoint)
+rownames(metadata) <- paste0(metadata$StudyID,"-",metadata$TimepointNumeric)
+
+#A Group field is been added manually to link groups based on discussions with collaborators 
+metadata["Group"] <- paste0("HIV-",metadata$HIV_Status,"-",metadata$MSM_status)
+
+#For simplicity and aesthetics positive and negative are replaces with the symbols 
+metadata$Group <- gsub("-Positive-","(+)",metadata$Group)
+metadata$Group <- gsub("-Negative-","(-)",metadata$Group)
+
+#Clinical data is selected from the Metadata 
+clin <- unique(metadata[which(metadata$Group %in% c("HIV(+)MSM", "HIV(-)MSM", "HIV(-)MSW")),])
+clin <- as.data.frame(clin)
+clin["Diet.Timepoint"] <- paste0(clin$Diet, "-", clin$TimepointNumeric)
+rownames(clin) <- paste0(clin$StudyID,"-",clin$TimepointNumeric)
+
+#Now we load the Blood CyToF data from an excel file
+bd_cytdata <- read_xlsx("Data/CyTOF/CyTOF_Data.xlsx", sheet="Master Blood (All)", range="A6:EG58")
+
+#Because the excel file is fortmated such that immune cells (varibales) are the rows and samples are the columns we need to adjust for our analyses
+#Also because other sample cohorts are included we only select those with diet modification IDs ("DM")
+bd_cytdata_all <- t(bd_cytdata[,which(substr(colnames(bd_cytdata), 1,2)=="DM")])
+
+#Column names are pulled for the immune cells fields
+colnames(bd_cytdata_all) <- t(bd_cytdata[,1])
+
+#Rownames are generated to include the sample ID and timepoint
+rownames(bd_cytdata_all) <- paste0("DM",substr(rownames(bd_cytdata_all),4,6),"-",substr(rownames(bd_cytdata_all),nchar(rownames(bd_cytdata_all)),nchar(rownames(bd_cytdata_all))))
+#Because "-2" in the CyTOF data corresponds to the "-3" in the metadata we adjust for joining
+rownames(bd_cytdata_all) <- str_replace_all(rownames(bd_cytdata_all), "-2", "-3") 
+
+
+#Now we want to adjoin the clinical data (metadata) to the CyTOF data (bd_cytdata_all)
+
+#We first select clinical variables of interest
+clinvars <- c("StudyID", "HIV","MSM","Diet", "Gender","EnterotypeBaseline","Age","Timepoint","TimepointNumeric", "LBPNorm", "HDLNorm", "LDLNorm", "TriglyceridesNorm", "HOMAIRNorm", "IL6Norm", "CRPNorm", "Group")
+
+#########Start with blood data################################
+#We pull the intersecting IDs (not all metadata is going to have CyTOF data)
+bd_ids <- intersect(rownames(clin),rownames(bd_cytdata_all))
+
+#We then pull both data subsets with those IDs
+meta_data_bd <- clin[which(rownames(clin) %in% bd_ids),which(colnames(clin) %in% clinvars)]
+bd_cytdata_withmet <- bd_cytdata_all[which(rownames(bd_cytdata_all) %in% bd_ids),] 
+
+#We then adjust the rownames to match the source data sets
+rownames(meta_data_bd) <- rownames(clin)[which(rownames(clin) %in% bd_ids)]
+rownames(bd_cytdata_withmet) <- rownames(bd_cytdata_all)[which(rownames(bd_cytdata_all) %in% bd_ids)] 
+
+#We create a blank matrix to put in each data set
+bd_all <- as.data.frame(matrix("",length(bd_ids), length(clinvars)+ncol(bd_cytdata_withmet)))
+
+#We then go through the ids and pull the data into the matrix
+for (i in 1:length(bd_ids)) {
+  id_1 <- bd_ids[i]
+  cln_1 <- meta_data_bd[which(rownames(meta_data_bd)==id_1),] 
+  cyt_1 <- bd_cytdata_withmet[which(rownames(bd_cytdata_withmet)==id_1),]
+  bd_all[i,] <- append(cln_1, cyt_1)
+}
+#We adjust the column names to match the orignal source datasets
+colnames(bd_all) <- append(colnames(meta_data_bd), colnames(bd_cytdata_withmet))
+#We adjust the row names to match everything else (study ID and the timepoint)
+rownames(bd_all) <- paste0(bd_all$StudyID,"-",bd_all$TimepointNumeric)
+
+#Now that all the raw data is combined, we want to see how many samples and features are missing values
+
+#First we assess sample that are missing feature values
+#We generate a blank matrix to add to
+samp_na <- c()
+
+#We then going through the data set to see how many features are missing for each sample (is.na)
+for (s in 1:nrow(bd_cytdata_withmet)) {
+  #First we pull the sample ID
+  samp_s <- rownames(bd_cytdata_withmet)[s]
+  #We see how many features are NA
+  count_s <- length(which(is.na(bd_cytdata_withmet[s,])))
+  #We add to the dataset 
+  samp_na <- rbind(samp_na, c(samp_s, count_s)) 
+}
+
+#We now convert it to a dataframe
+samp_na <- as.data.frame(samp_na)
+
+#We adjust the column names
+colnames(samp_na) <- c("samp", "Count")
+
+#Now we assess features that are missing sample values 
+#We generate a blank matrix to add to
+col_na <- c()
+#We then going through the data set to see how many samples are missing for each feature (is.na)
+for (c in 1:ncol(bd_cytdata_withmet)) {
+  #First we pull the feature
+  col_c <- colnames(bd_cytdata_withmet)[c]
+  #We see how many samples are NA
+  count_c <- length(which(is.na(bd_cytdata_withmet[,c])))
+  #We add to the dataset
+  col_na <- rbind(col_na, c(col_c, count_c)) 
+}
+
+#We now convert it to a dataframe
+col_na <- as.data.frame(col_na)
+
+#We adjust the column names
+colnames(col_na) <- c("col", "Count")
+
+#We filter to include sampels and columns that are less than half unvailable 
+#samp_inc <- samp_na$samp[which(as.numeric(samp_na$Count)<(length(bd_cytdata_withmet[1,])/2))]
+#col_inc <- col_na$col[which(as.numeric(col_na$Count)<(length(bd_cytdata_withmet[,1])/2))]
+samp_inc <- samp_na$samp[which(as.numeric(samp_na$Count)<50)]
+col_inc <- col_na$col[which(as.numeric(col_na$Count)<50)]
+
+#We generate proc (processed) and raw data sets for only the samples and columns we want to include staring first with the base meta data dnsequentially filling the columns out
+bd_all_proc <- bd_all[which(rownames(bd_all) %in% samp_inc),1:ncol(meta_data_bd)]
+bd_all_raw <- bd_all[which(rownames(bd_all) %in% samp_inc),1:ncol(meta_data_bd)]
+
+#Going through the cytof data we pull in the columns in
+for (j in 1:ncol(bd_cytdata_withmet)) {
+  #First we want to see if it is one of the columns we want to include
+  if (colnames(bd_cytdata_withmet)[j] %in% col_inc) {
+    #If it is, we scale the column 
+    normvec <- scale(as.numeric(bd_all[,ncol(meta_data_bd)+j]))
+    #We add the scaled data to the processed data file
+    bd_all_proc <- cbind(bd_all_proc, normvec)
+    #We afdjust the column name of the new added column
+    colnames(bd_all_proc)[ncol(bd_all_proc)] <- paste0(colnames(bd_all)[ncol(meta_data_bd)+j],"_Norm")
+    #We add the raw data to the raw datafile
+    bd_all_raw <- cbind(bd_all_raw, as.numeric(bd_all[,ncol(meta_data_bd)+j]))
+    #We afdjust the column name of the new added column
+    colnames(bd_all_raw)[ncol(bd_all_raw)] <- paste0(colnames(bd_all)[ncol(meta_data_bd)+j],"_Raw")
+  }
+}
+#We convert the matrices into data frames
+bd_all_proc <- as.data.frame(bd_all_proc)
+bd_all_raw <- as.data.frame(bd_all_raw)
+
+
+
+#We perform an imputation using Multivariate Imputation by Chained Equations (mice)
+#We pull the imputable dala (processed) but just the CYTOF fields we want to impute
+n_imp_data <- bd_all_proc[,(ncol(meta_data_bd)+1):ncol(bd_all_proc)]
+#We store the original columns wehich need to be changed for the impuation
+origcol <- colnames(n_imp_data)
+#We rename the columns to allow for impuation
+colnames(n_imp_data) <- paste0("c", 1:ncol(n_imp_data))
+#We generate an impuation model
+imp_model <- mice(n_imp_data)
+#We use the model to omplete the data
+imp_data <- complete(imp_model)
+#Now a new dataset is generated that is both processed and imputed ("proc_imp")
+bd_all_proc_imp <- cbind(bd_all_proc[which(rownames(bd_all_proc) %in% samp_inc),1:ncol(meta_data_bd)], imp_data)
+
+
+#We also export biom format data for the SCINIC Analysis
+#Both the Processed and raw data
+#First Processed
+bd_all_proc_imp_for_biom <- bd_all_proc_imp[,18:ncol(bd_all_proc_imp)]
+origcol_proc_imp <- origcol
+bd_all_proc_imp_biom <- make_biom(t(bd_all_proc_imp_for_biom))
+#Then Raw
+bd_all_raw_for_biom <- bd_all_raw[,18:ncol(bd_all_raw)]
+origcol_raw <- colnames(bd_all_raw_for_biom)
+colnames(bd_all_raw_for_biom) <- paste0("c",1:ncol(bd_all_raw_for_biom))
+bd_all_raw_biom <-  make_biom(t(na.omit(bd_all_raw_for_biom))) 
+#We also export biom format data
+write_biom(bd_all_proc_imp_biom,"Data/Exported_from_R/bd_all_proc.biom")
+write_biom(bd_all_raw_biom,"Data/Exported_from_R/bd_all_raw.biom")
+
+#We also need to store the column names as well
+
+colnames_table <- cbind(paste0("c",1:ncol(bd_all_raw_for_biom)), origcol_raw, origcol_proc_imp)
+
+
+```
+
+###Ordination
+
+```{r}
+
+ann_data <- bd_all_proc_imp[,1:17]
+pcoa_data <- bd_all_proc_imp[,18:ncol(bd_all_proc_imp)]
+
+
+di_m <- vegdist(pcoa_data, method="euclidean", na.rm=TRUE)
+
+
+
+log_pcoadata <- pcoa_data
+ordination_result <- prcomp(log_pcoadata)
+biplot(ordination_result)
+
+
+prcomp_res <- ordination_result 
+
+feat_cont <- as.data.frame(prcomp_res$rotation)
+
+feat_cont["Dist"] <- NA
+for (r in 1:nrow(feat_cont)) {
+  feat_cont$Dist[r] <- euclidean(rep(0,51),feat_cont[r,1:51])
+}
+
+
+contributions <- as.data.frame(prcomp_res$center^2)
+colnames(contributions) <- "Cont"
+
+cont_order = as.data.frame(contributions[order(-contributions$Cont),])
+
+cont_top_10 <- cont_order[1:10,1]
+feat_top_10 <- rownames(contributions)[which(contributions$Cont %in% cont_top_10)]
+
+feat_cont_top_10 <- feat_cont[which(rownames(feat_cont) %in% feat_top_10),]
+
+
+feat_arrows <- data.frame(
+  xstart = rep(0,10),  # Replace with your actual x-coordinate start points
+  ystart = rep(0,10),  # Replace with your actual y-coordinate start points
+  xend = 30*feat_cont_top_10$PC1,  # Replace with your actual x-coordinate end points
+  yend = 30*feat_cont_top_10$PC2,  # Replace with your actual y-coordinate end points
+  label=rownames(feat_cont_top_10)
+)
+
+feat_arrows$label <- gsub("_Raw","",feat_arrows$label)
+feat_arrows$label <- gsub("_Norm","",feat_arrows$label)
+
+
+sum_pcoa <- summary(prcomp_res)
+imp_pcoa <- sum_pcoa$importance
+prcomp_res_data <- as.data.frame(prcomp_res$x)
+prcomp_res_met <- cbind(prcomp_res_data,ann_data)
+prcomp_res_met["Diet.Timepoint"] <- paste0(prcomp_res_met$Diet, "-", prcomp_res_met$TimepointNumeric)
+
+prcomp_res_met["Group"] <- ""
+for (n in 1:nrow(prcomp_res_met)) {
+  stud_n <- prcomp_res_met$StudyID[n]
+  time_n <- prcomp_res_met$TimepointNumeric[n]
+  prcomp_res_met$Group[n] <- metadata$Group[which(metadata$StudyID==stud_n & metadata$TimepointNumeric==time_n)]
+}
+
+prcomp_res_met$Group <- gsub("-Negative-","(-)",prcomp_res_met$Group)
+prcomp_res_met$Group <- gsub("-Positive-","(+)",prcomp_res_met$Group)
+
+prcomp_res_met_filt <- prcomp_res_met[which(prcomp_res_met$Group %in% c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),]
+
+pcoaplot_strat <- ggplot() + 
+                        geom_path(data=prcomp_res_met_filt, mapping = aes(x = as.numeric(PC1), y = as.numeric(PC2), group = StudyID),
+            linewidth=1,          
+            position = position_dodge(0.1),
+            alpha = .5,
+            size=1)+
+            geom_point(data = prcomp_res_met_filt, size=4, aes(x = as.numeric(prcomp_res_met_filt$PC1), y = as.numeric(prcomp_res_met_filt$PC2), color=prcomp_res_met_filt$Diet.Timepoint))+
+            scale_color_manual(values = c("lightgreen", "darkgreen", "orange", "orange4"), name="Diet-Timepoint")+
+            labs(x=paste0("PCo1 (",round(imp_pcoa[2,1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(imp_pcoa[2,2]*100, digits = 1),"%)"), key=" ", title="PCoA of Blood CyTOF Data")+
+            guides(color=guide_legend(nrow=1,bycol=TRUE))+
+            theme_bw()+
+            facet_nested(cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW"))),
+                         rows=vars(Diet))+ 
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+pcoaplot_biplot <- ggplot() + 
+                        geom_line(data = prcomp_res_met_filt,aes(x = as.numeric(prcomp_res_met_filt$PC1), y = as.numeric(prcomp_res_met_filt$PC2), group=prcomp_res_met_filt$StudyID), alpha=.5)+
+            geom_point(data = prcomp_res_met_filt, size=4, aes(x = as.numeric(prcomp_res_met_filt$PC1), y = as.numeric(prcomp_res_met_filt$PC2), color=prcomp_res_met_filt$Timepoint))+
+            scale_color_manual(values = c("gray","black"), name="Timepoint")+
+            labs(x=paste0("PCo1 (",round(imp_pcoa[2,1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(imp_pcoa[2,2]*100, digits = 1),"%)"), key=" ", title="PCoA of Blood CyTOF Data")+
+            geom_segment(data = feat_arrows, aes(x = xstart, y = ystart, xend = xend, yend = yend),arrow = arrow(length = unit(0.3, "cm")), color="red")+
+            geom_label_repel(aes(x = feat_arrows$xend, y = feat_arrows$yend, label=feat_arrows$label), size=5, box.padding = 0.5, fill="gray")+
+            guides(color=guide_legend(nrow=2,bycol=TRUE))+
+            theme_bw()+
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+
+##Adonis
+ann_data$Diet <- as.factor(ann_data$Diet)
+ann_data$HIV <- as.factor(ann_data$HIV)
+ann_data$MSM <- as.factor(ann_data$MSM)
+ann_data$StudyID <- as.factor(ann_data$StudyID)
+ann_data$EnterotypeBaseline <- as.factor(ann_data$EnterotypeBaseline)
+
+ann_data_1 <- ann_data[which(ann_data$TimepointNumeric==1),]
+di_m_1 <- vegdist(pcoa_data[which(ann_data$TimepointNumeric==1),], method="euclidean", na.rm=TRUE)
+
+
+ann_data_3 <- ann_data[which(ann_data$TimepointNumeric==3),]
+di_m_3 <- vegdist(pcoa_data[which(ann_data$TimepointNumeric==3),], method="euclidean", na.rm=TRUE)
+
+
+adonis_MSM_HIV_Diet_1 <- adonis2(di_m_1~ann_data_1$MSM + ann_data_1$HIV + ann_data_1$Diet)
+adonis_MSM_HIV_Diet_3 <- adonis2(di_m_3~ann_data_3$MSM + ann_data_3$HIV + ann_data_3$Diet)
+
+adonis_MSM_HIV_Diet <- adonis2(di_m~ann_data$MSM + ann_data$HIV + ann_data$Diet + ann_data$Timepoint + ann_data$StudyID)
+
+#Adonis_Strat_DataSet
+adonis_strat_data_set <- unique(expand.grid(ann_data$TimepointNumeric,c("MSM","HIV","Diet")))
+colnames(adonis_strat_data_set) <- c("TimepointNumeric","Factor")
+adonis_strat_data_set["F_val"] <- NA
+adonis_strat_data_set["R2_val"] <- NA
+adonis_strat_data_set["p_val"] <- NA
+for (j in 1:nrow(adonis_strat_data_set)) {
+  adonis_j <- get(paste0("adonis_MSM_HIV_Diet_",(adonis_strat_data_set$TimepointNumeric[j])))
+  row_j <- which(rownames(adonis_j)==paste0("ann_data_",adonis_strat_data_set$TimepointNumeric[j],"$",adonis_strat_data_set$Factor[j]))  
+  adonis_strat_data_set$F_val[j] <- adonis_j$F[row_j]
+  adonis_strat_data_set$R2_val[j] <- adonis_j$R2[row_j]
+  adonis_strat_data_set$p_val[j] <- adonis_j$`Pr(>F)`[row_j]
+}
+
+adonis_strat_data_set["Timepoint"] <- paste0("T",adonis_strat_data_set$TimepointNumeric)
+barplot_adonis <- ggplot(data=adonis_strat_data_set, aes(x=Factor,y=R2_val, fill=Timepoint)) +
+                  scale_fill_manual(values=c("gray","black"))+
+                  geom_bar(stat="identity", position="dodge")+
+                  geom_text(aes(label = p_val), 
+                    position = position_dodge(width = 1),
+                    vjust = -0.5, 
+                   size = 4, 
+                    color = "black")+
+                  labs(y="R-squared", x="Category")+
+                  theme_bw()+
+                  theme(title=element_text(size=15),
+                    axis.text.y=element_text(size=15),
+                    axis.text.x=element_text(size=15),
+                    strip.text.y = element_text(size=15),
+                    strip.text.x = element_text(size=15),
+                    axis.title = element_text(size=15),
+                    axis.title.y.right = element_text(size = 15),
+                    legend.text=element_text(size=15),
+                    plot.tag = element_text(size=25),
+                    legend.title=element_blank(),
+                    legend.position = "bottom")
+
+
+#Now we stratify by time and the two variables
+msm_prcomp_res_met_filt <- prcomp_res_met_filt
+hiv_prcomp_res_met_filt <- prcomp_res_met_filt
+diet_prcomp_res_met_filt <- prcomp_res_met_filt
+
+msm_prcomp_res_met_filt$Factor <- "MSM Status"
+hiv_prcomp_res_met_filt$Factor <- "HIV Status"
+diet_prcomp_res_met_filt$Factor <- "Diet"
+
+msm_prcomp_res_met_filt$FactorVal <- msm_prcomp_res_met_filt$MSM
+hiv_prcomp_res_met_filt$FactorVal <- hiv_prcomp_res_met_filt$HIV
+diet_prcomp_res_met_filt$FactorVal <- diet_prcomp_res_met_filt$Diet
+
+
+all_start_pcoa <- rbind(msm_prcomp_res_met_filt, hiv_prcomp_res_met_filt, diet_prcomp_res_met_filt)
+
+
+all_pcoa_adonis <- ggplot(data=all_start_pcoa, mapping = aes(x = as.numeric(PC1), y = as.numeric(PC2))) + 
+            geom_path(aes(group=StudyID),
+            linewidth=1,          
+            position = position_dodge(0.1),
+            alpha = .5,
+            size=1)+
+            geom_point(aes(color=FactorVal))+
+            stat_ellipse(geom="polygon",
+                         aes(fill=FactorVal),
+                         alpha=0.25)+
+#            scale_color_manual(values = c("lightgreen", "darkgreen", "orange", "orange4"), name="Diet-Timepoint")+
+            labs(x=paste0("PCo1 (",round(imp_pcoa[2,1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(imp_pcoa[2,2]*100, digits = 1),"%)"), key=" ", title="PCoA of Blood CyTOF Data")+
+            guides(color=guide_legend(nrow=1,bycol=TRUE))+
+            theme_bw()+
+            facet_nested(cols=vars(Timepoint),
+                         rows=vars(Factor))+ 
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+```
+
+
+###T1-T3 Deltas
+
+```{r}
+
+t1t3_delta <- unique(ann_data[,which(colnames(ann_data) %in% c("Group","Diet","StudyID"))])
+t1t3_delta["Delta_T1T3"] <- NA
+for (r in 1:nrow(t1t3_delta)) {
+  stud_r <- t1t3_delta$StudyID[r]
+  row_1 <- which(ann_data$StudyID==stud_r & ann_data$TimepointNumeric==1)
+  row_3 <- which(ann_data$StudyID==stud_r & ann_data$TimepointNumeric==3)
+  data_1 <- as.numeric(pcoa_data[row_1,])
+  data_3 <- as.numeric(pcoa_data[row_3,])
+  dist_r <- euclidean(data_1,data_3)
+  t1t3_delta$Delta_T1T3[r] <- dist_r
+}
+
+
+diet_stats <- rbind(c("Delta_T1T3","HIV(+)MSM","Agrarian","Western"),
+               c("Delta_T1T3","HIV(-)MSM","Agrarian","Western"),
+               c("Delta_T1T3","HIV(-)MSW","Agrarian","Western"))
+diet_stats <- as.data.frame(diet_stats)     
+colnames(diet_stats) <- c("Measure","Group","group1","group2")
+diet_stats["p_val"] <- NA
+
+for (k in 1:nrow(diet_stats)) {
+  data_k <- t1t3_delta[which(t1t3_delta$Group==diet_stats$Group[k]),]
+  wilx_k <- wilcox_test(data=data_k, Delta_T1T3~Diet)
+  diet_stats$p_val[k] <- wilx_k$p
+}
+  
+
+box_plot_diet <- ggplot(data=t1t3_delta, aes(x=Group, y=Delta_T1T3, fill=Diet))+
+  geom_boxplot(outliers=FALSE)+
+  geom_jitter()+
+  scale_fill_manual(values=c("darkgreen","darkorange"))+
+              theme_bw()+
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+```
+

@@ -1,0 +1,1257 @@
+---
+title: "DM Metabolic Outcome Analysis"
+author: "J. O'Connor"
+date: "2024-05-14"
+output: html_document
+---
+## R Metabolic Analysis
+
+This is an R Markdown document that includes the R analysis for the metabolic outcomes in the diet modification study.
+
+### Initial Data Loading and Preprocessing
+
+The initial data is loaded
+
+
+```{r}
+# The Working Directory is Set
+setwd("..")
+
+# Necessary Packages are Loaded
+library(multcompView)
+library(ggplot2)
+library (ggpubr)
+library(tidyr)
+library(reshape2)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(factoextra)
+library(ggforce)
+library(ggh4x)
+library(lme4)
+library(tidyverse)
+
+# Necessary Functions are Sourced 
+function_files <- list.files(paste0(getwd(),"/Functions"), pattern = "\\.R$", full.names = TRUE)
+lapply(function_files, source)
+
+# Metadata is pulled in from an excel file
+metadata <- read_xlsx("Data/Metadata/metadata.xlsx")
+
+# Manual MSM edits per Dr. Lozupone's edits
+MSM_spec <- rbind(c("DM001", "MSM", "MSM"),
+                  c("DM002", "MSM", "MSM"),
+                  c("DM007", "MSM", "MSM"),
+                  c("DM010", "MSM", "MSM"),
+                  c("DM021", "MSW", "NonMSM"),
+                  c("DM093", "MSW", "NonMSM"),
+                  c("DM046", "MSM", "MSM"))
+colnames(MSM_spec) <- c("StudyID", "MSM_status", "MSM_status2")
+MSM_spec <- as.data.frame(MSM_spec)
+
+# MSM status changed made to the medadata file 
+
+for (j in 1:nrow(metadata)) {
+  if (metadata$StudyID[j] %in% MSM_spec$StudyID) {
+    MSM_status_j <- unique(MSM_spec$MSM_status[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    MSM_status2_j <- unique(MSM_spec$MSM_status2[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    metadata$MSM_status[j] <-MSM_status_j 
+    metadata$MSM_status2[j] <-MSM_status2_j 
+  }
+}
+
+#A Group field is been added manually to link groups based on discussions with collaborators and a pairing field is added that provides a numerical value unique to each studyID
+metadata["pairing"] <- add_pairing(metadata$StudyID)
+metadata["Group"] <- paste0("HIV-",metadata$HIV_Status,"-",metadata$MSM_status)
+
+#For simplicity and aesthetics positive and negative are replaces with the symbols 
+metadata$Group <- gsub("-Positive-","(+)",metadata$Group)
+metadata$Group <- gsub("-Negative-","(-)",metadata$Group)
+
+#Clinical data is selected from the Metadata 
+clin <- unique(metadata[which(metadata$Group %in% c("HIV(+)MSM", "HIV(-)MSM", "HIV(-)MSW")),])
+clin <- as.data.frame(clin)
+clin["Diet.Timepoint"] <- paste0(clin$Diet, "-", clin$TimepointNumeric)
+
+
+```
+
+### Longitudinal Statistics
+
+Changes in Metabolic Markers are compared across the study groups
+
+```{r}
+
+#Initial longitudinal statistics are generated
+
+met_vars <- c("HDL", "LDL", "Triglycerides","HOMAIR")
+
+#Stacked data will be generated for plotting
+stack_data <- c()
+for (v in met_vars) {
+  vnum <- which(colnames(clin)==v)
+  clin[,vnum] <- as.numeric(clin[,vnum])
+  varstack <- cbind(clin$StudyID, clin$Timepoint, clin$Group, clin$Diet, clin$pairing, clin[,vnum], rep(v, nrow(clin)))
+  colnames(varstack) <- c("StudyID", "Timepoint", "Group", "Diet", "pairing", "Amount", "Measure") 
+  varstack <- as.data.frame(varstack)
+  varstack$Amount <- as.numeric(varstack$Amount)
+  varstack_filt_pre <- varstack[which(!is.na(varstack$Amount)),]
+  varstack_filt <- varstack_filt_pre %>%
+    group_by(StudyID) %>%
+    filter(n() > 1) %>%
+    ungroup()
+  stack_data <- rbind(stack_data, varstack_filt)
+}
+
+
+#Each metabolic variable will be compared across the study period using mixed effects linear models
+
+sum_met_long_stats <- long_stat_sum(clin, c("Group","Diet"),"Timepoint",met_vars,"StudyID", FALSE)
+print(sum_met_long_stats)
+
+###Bonferonni Correction
+
+#We do the correction for each measure and group diet subset, so we initially select those combinations with each measure
+
+sum_met_long_stats_cats <- unique(sum_met_long_stats[which(colnames(sum_met_long_stats) %in% c("Group","Diet", "Measure"))])
+
+#A new adjusted p-value field is created
+sum_met_long_stats["padj"] <- NA
+
+#For each category combo why do a correction for those p values
+for (s in 1:nrow(sum_met_long_stats_cats)) {
+ group_s <- sum_met_long_stats_cats$Group[s]
+ diet_s <- sum_met_long_stats_cats$Diet[s]
+ meas_s <- sum_met_long_stats_cats$Measure[s]
+ rows_s <- which(sum_met_long_stats$Group==group_s & sum_met_long_stats$Diet==diet_s & sum_met_long_stats$Measure==meas_s)
+ sum_met_long_stats$padj[rows_s] <- p.adjust(sum_met_long_stats$`p-value`[rows_s], method="bonferroni")
+}
+
+#A new significance field is defined by the adjusted p values
+sum_met_long_stats$p.signif <- add_asterisks(sum_met_long_stats$padj)
+
+
+#Each metabolic variable will also be compared across groups at each point in the study period using t-tests
+
+sum_met_gp_stats <- gp_stat_sum(clin,"Timepoint",met_vars,"Diet", FALSE)
+print(sum_met_gp_stats)
+
+```
+
+### Violin Pots
+
+The data are presented in Violin plots
+
+```{r}
+
+#For plotting the stats will be adjusted to include y-positions and new aschetically pleasing metabolic outcome names 
+
+sum_met_long_stats["NewMeasure"] <- ""
+sum_met_long_stats["y.position"] <- NA
+
+for (r in 1:nrow(sum_met_long_stats)) {
+#  if (sum_met_long_stats$Measure[r]=="HDLNorm") {
+  if (sum_met_long_stats$Measure[r]=="HDL") {
+    sum_met_long_stats$NewMeasure[r] <- "HDL-C (mg/dL)"
+    sum_met_long_stats$y.position[r] <- 80
+  } else {
+#    if (sum_met_long_stats$Measure[r]=="LDLNorm") {
+    if (sum_met_long_stats$Measure[r]=="LDL") {
+      sum_met_long_stats$NewMeasure[r] <- "LDL-C (mg/dL)"
+      sum_met_long_stats$y.position[r] <- 170 
+    } else {
+#      if (sum_met_long_stats$Measure[r]=="TriglyceridesNorm") {
+      if (sum_met_long_stats$Measure[r]=="Triglycerides") {
+        sum_met_long_stats$NewMeasure[r] <- "Triglycerides (mg/dL)"
+        sum_met_long_stats$y.position[r] <- 6.5 
+      } else {
+        sum_met_long_stats$NewMeasure[r] <- "HOMA-IR"
+        sum_met_long_stats$y.position[r] <- 20 #2.2 
+      }
+    }
+  }
+}
+sum_met_long_stats$Group <- gsub("-Negative-", "(-)", sum_met_long_stats$Group)
+sum_met_long_stats$Group <- gsub("-Positive-", "(+)", sum_met_long_stats$Group)
+
+stack_data["NewMeasure"] <- ""
+for (r in 1:nrow(stack_data)) {
+  if (stack_data$Measure[r]=="HDL") {
+    stack_data$NewMeasure[r] <- "HDL-C (mg/dL)"
+  } else {
+    if (stack_data$Measure[r]=="LDL") {
+      stack_data$NewMeasure[r] <- "LDL-C (mg/dL)"
+    } else {
+      if (stack_data$Measure[r]=="Triglycerides") {
+        stack_data$NewMeasure[r] <- "Triglycerides (mg/dL)"
+      } else {
+        stack_data$NewMeasure[r] <- "HOMA-IR"
+      }
+    }
+  }
+}
+stack_data$Group <- gsub("-Negative-", "(-)", stack_data$Group)
+stack_data$Group <- gsub("-Positive-", "(+)", stack_data$Group)
+
+stack_data["Healthy_Min"] <- NA
+stack_data["Healthy_Max"] <- NA
+
+
+
+for (r in 1:nrow(stack_data)) {
+  if (stack_data$Measure[r]=="HDL") {
+      stack_data$Healthy_Min[r]<-40
+      stack_data$Healthy_Max[r]<-100
+  }
+  if (stack_data$Measure[r]=="LDL") {
+      stack_data$Healthy_Min[r]<-0
+      stack_data$Healthy_Max[r]<-100
+  }
+  if (stack_data$Measure[r]=="Triglycerides") {
+      stack_data$Healthy_Min[r]<-0
+      stack_data$Healthy_Max[r]<-100
+  }
+  if (stack_data$Measure[r]=="HOMAIR") {
+      stack_data$Healthy_Min[r]<-0
+      stack_data$Healthy_Max[r]<-2.5
+  }
+  
+}
+
+viol_plot <- ggplot(data = stack_data,
+                      mapping = aes(x = Timepoint, y = as.numeric(Amount), fill = Diet)) +
+geom_violin() +
+geom_line(mapping = aes(group = pairing),
+          position = position_dodge(0.1),
+          alpha = 1,
+          size=1) +
+geom_point(mapping = aes(fill = Diet, group = pairing),
+           size = 2, shape = 21,
+           position = position_dodge(0.1)) +
+geom_rect(data = stack_data, aes(ymin = Healthy_Min, ymax = Healthy_Max, xmin=-Inf, xmax=Inf), fill = "green", alpha=0.005)+
+scale_fill_manual(values=c("darkgreen","darkorange"))+
+labs(y="Metabolic Measure")+
+theme_classic() +
+theme(legend.position = "bottom",
+      legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  stat_pvalue_manual(
+    sum_met_long_stats,
+    label = "p.signif",
+    hide.ns = TRUE,
+    step.increase = 0.1,
+    step.group.by = c("Group")
+  ) +
+  facet_nested(rows=vars(NewMeasure),
+               #rows=vars(Measure),
+               cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),Diet), 
+               scales="free_y")
+
+
+#Now we just focus on the significantly altered metabolites 
+#First we select all measures that had at least one significant change
+stack_sig_measures <- unique(sum_met_long_stats$NewMeasure[which(sum_met_long_stats$padj<0.05)])
+
+# We pull data and stats on those measures 
+sig_viol_data <- stack_data[which(stack_data$NewMeasure %in% stack_sig_measures),]
+sig_viol_stats <- sum_met_long_stats[which(sum_met_long_stats$NewMeasure %in% stack_sig_measures),]
+
+#Range Data will be selected to avoid overlap
+sig_range_data_pre_x1 <- unique(sig_viol_data[,which(colnames(sig_viol_data) %in% c("Group","NewMeasure","Diet","Healthy_Min","Healthy_Max"))])
+sig_range_data_pre_x1["Timepoint"] <- -Inf
+sig_range_data_pre_x2 <- unique(sig_viol_data[,which(colnames(sig_viol_data) %in% c("Group","NewMeasure","Diet","Healthy_Min","Healthy_Max"))])
+sig_range_data_pre_x2["Timepoint"] <- Inf
+
+sig_range_data <- rbind(sig_range_data_pre_x1, sig_range_data_pre_x2)
+
+#We generate a plot with those measure
+sig_viol_plot <- ggplot(data = sig_viol_data,
+                      mapping = aes(x = Timepoint, y = as.numeric(Amount), fill = Diet)) +
+geom_rect(data = sig_range_data, aes(ymin = Healthy_Min, ymax = Healthy_Max, xmin=-Inf, xmax=Inf), fill = "palegreen", alpha=0.2, inherit.aes = FALSE)+
+geom_violin() +
+geom_line(mapping = aes(group = pairing),
+          position = position_dodge(0.1),
+          alpha = 1,
+          size=1) +
+geom_point(mapping = aes(fill = Diet, group = pairing),
+           size = 2, shape = 21,
+           position = position_dodge(0.1)) +
+scale_fill_manual(values=c("darkgreen","darkorange"))+
+labs(y="Metabolic Measure")+
+theme_classic() +
+theme(legend.position = "bottom",
+      legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  stat_pvalue_manual(
+    sig_viol_stats,
+    label = "p.signif",
+    hide.ns = TRUE,
+    step.increase = 0.1,
+    step.group.by = c("Group")
+  ) +
+  facet_nested(rows=vars(NewMeasure),
+               #rows=vars(Measure),
+               cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),Diet), 
+               scales="free_y")
+
+```
+
+
+### Categorical Cross Sectional Comparisons
+
+Below we indicate which samples are in or out of the healthy range and tabulate them
+
+```{r}
+#An in range field ("yes"/"no") is generated 
+
+stack_data["InRange"] <- ""
+
+#Below we indicate which samples are in the range 
+for (r in 1:nrow(stack_data)) {
+  if (stack_data$Measure[r]=="HDL") {
+    stud_id_r <- stack_data$StudyID[r]
+    gen_r <- unique(metadata$Gender[which(metadata$StudyID==stud_id_r)])
+    if (gen_r=="Male") {
+      if (as.numeric(stack_data$Amount[r]) >= 40) {
+        stack_data$InRange[r] <- "Yes" 
+      } else {
+        stack_data$InRange[r] <- "No"
+      } 
+    } else {
+      if (as.numeric(stack_data$Amount[r]) >= 50) {
+        stack_data$InRange[r] <- "Yes" 
+      } else {
+        stack_data$InRange[r] <- "No"
+      }
+    }
+  } else {
+    if (as.numeric(stack_data$Amount[r]) < as.numeric(stack_data$Healthy_Max[r])) {
+      stack_data$InRange[r] <- "Yes"
+    } else {
+      stack_data$InRange[r] <- "No"
+    }
+  }
+}
+
+#Initially we tabulate the numbers for descriptions in the results
+
+#HDL results are tabulated
+hdl_stack <- stack_data[which(stack_data$Measure=="HDL"),] 
+hdl_freq_tab <- matrix(NA, nrow=length(unique(stack_data$Timepoint)), ncol=length(unique(stack_data$Group))) 
+rownames(hdl_freq_tab) <- unique(stack_data$Timepoint)
+colnames(hdl_freq_tab) <- unique(stack_data$Group)
+for (j in 1:nrow(hdl_freq_tab)) {
+  for (k in 1:ncol(hdl_freq_tab)) {
+    tm_j <- as.character(rownames(hdl_freq_tab)[j])
+    grp_k <- as.character(colnames(hdl_freq_tab)[k]) 
+    tot_num_jk <- length(hdl_stack$StudyID[which(hdl_stack$Timepoint==tm_j & hdl_stack$Group==grp_k)])
+    yes_num_jk <- length(hdl_stack$StudyID[which(hdl_stack$Timepoint==tm_j & hdl_stack$Group==grp_k & hdl_stack$InRange=="Yes")])
+    hdl_freq_tab[j,k] <- paste0(yes_num_jk, "/", tot_num_jk, "(",100*round(yes_num_jk/tot_num_jk, digits = 3) ,"%)")
+  }
+}
+
+#LDL results are tabulated
+ldl_stack <- stack_data[which(stack_data$Measure=="LDL"),] 
+ldl_freq_tab <- matrix(NA, nrow=length(unique(stack_data$Timepoint)), ncol=length(unique(stack_data$Group))) 
+rownames(ldl_freq_tab) <- unique(stack_data$Timepoint)
+colnames(ldl_freq_tab) <- unique(stack_data$Group)
+for (j in 1:nrow(ldl_freq_tab)) {
+  for (k in 1:ncol(ldl_freq_tab)) {
+    tm_j <- as.character(rownames(ldl_freq_tab)[j])
+    grp_k <- as.character(colnames(ldl_freq_tab)[k]) 
+    tot_num_jk <- length(ldl_stack$StudyID[which(ldl_stack$Timepoint==tm_j & ldl_stack$Group==grp_k)])
+    yes_num_jk <- length(ldl_stack$StudyID[which(ldl_stack$Timepoint==tm_j & ldl_stack$Group==grp_k & ldl_stack$InRange=="Yes")])
+    ldl_freq_tab[j,k] <- paste0(yes_num_jk, "/", tot_num_jk, "(",100*round(yes_num_jk/tot_num_jk, digits = 3) ,"%)")
+  }
+}
+
+#Triglyceride Results were tablated
+trg_stack <- stack_data[which(stack_data$Measure=="Triglycerides"),]
+trg_freq_tab <- matrix(NA, nrow=length(unique(stack_data$Timepoint)), ncol=length(unique(stack_data$Group))) 
+rownames(trg_freq_tab) <- unique(stack_data$Timepoint)
+colnames(trg_freq_tab) <- unique(stack_data$Group)
+for (j in 1:nrow(trg_freq_tab)) {
+  for (k in 1:ncol(trg_freq_tab)) {
+    tm_j <- as.character(rownames(trg_freq_tab)[j])
+    grp_k <- as.character(colnames(trg_freq_tab)[k]) 
+    tot_num_jk <- length(trg_stack$StudyID[which(trg_stack$Timepoint==tm_j & trg_stack$Group==grp_k)])
+    yes_num_jk <- length(trg_stack$StudyID[which(trg_stack$Timepoint==tm_j & trg_stack$Group==grp_k & trg_stack$InRange=="Yes")])
+    trg_freq_tab[j,k] <- paste0(yes_num_jk, "/", tot_num_jk, "(",100*round(yes_num_jk/tot_num_jk, digits = 3) ,"%)")
+  }
+}
+
+#HOMA-IR results are tabulated
+hom_stack <- stack_data[which(stack_data$Measure=="HOMAIR"),] 
+hom_freq_tab <- matrix(NA, nrow=length(unique(stack_data$Timepoint)), ncol=length(unique(stack_data$Group))) 
+rownames(hom_freq_tab) <- unique(stack_data$Timepoint)
+colnames(hom_freq_tab) <- unique(stack_data$Group)
+for (j in 1:nrow(hom_freq_tab)) {
+  for (k in 1:ncol(hom_freq_tab)) {
+    tm_j <- as.character(rownames(hom_freq_tab)[j])
+    grp_k <- as.character(colnames(hom_freq_tab)[k]) 
+    tot_num_jk <- length(hom_stack$StudyID[which(hom_stack$Timepoint==tm_j & hom_stack$Group==grp_k)])
+    yes_num_jk <- length(hom_stack$StudyID[which(hom_stack$Timepoint==tm_j & hom_stack$Group==grp_k & hom_stack$InRange=="Yes")])
+    hom_freq_tab[j,k] <- paste0(yes_num_jk, "/", tot_num_jk, "(",100*round(yes_num_jk/tot_num_jk, digits = 3) ,"%)")
+  }
+}
+
+###Now we perform some of the categorical statistics
+#I will first assess how they differ across groups at each timepoint
+#We first make a base data set with timepoints and measures 
+time_group_stats <- unique(expand.grid(stack_data$Timepoint, met_vars))
+colnames(time_group_stats) <- c("Timepoint","Measure")
+
+#We create columns for p values and adjusted p values
+time_group_stats["p_HpMvsHnM"] <- NA
+time_group_stats["p_HnMvsHnW"] <- NA
+time_group_stats["p_HpMvsHnW"] <- NA
+time_group_stats["padj_HpMvsHnM"] <- NA
+time_group_stats["padj_HnMvsHnW"] <- NA
+time_group_stats["padj_HpMvsHnW"] <- NA
+
+#Now we go through the data and generate pairwise values from chi_square tests
+for (c in 1:nrow(time_group_stats)) {
+  #Each timepoint is pulled
+  tp_c <- as.character(time_group_stats$Timepoint[c])
+  #Each variable is pulled
+  var_c <- as.character(time_group_stats$Measure[c])
+  #Then the data for those is pulled
+  data_c <- stack_data[which(stack_data$Timepoint==tp_c & stack_data$Measure==var_c),]
+  #Subsets of data are pulled for pairwise comparisons
+  data_c_gp12 <- data_c[which(data_c$Group %in% c("HIV(+)MSM","HIV(-)MSM")),]
+  data_c_gp23 <- data_c[which(data_c$Group %in% c("HIV(-)MSM","HIV(-)MSW")),]
+  data_c_gp13 <- data_c[which(data_c$Group %in% c("HIV(+)MSM","HIV(-)MSW")),]
+  #Chi_square tests are performed
+  chi_gp12 <- chisq.test(data_c_gp12$Group, data_c_gp12$InRange)
+  chi_gp23 <- chisq.test(data_c_gp23$Group, data_c_gp23$InRange)
+  chi_gp13 <- chisq.test(data_c_gp13$Group, data_c_gp13$InRange)
+  #p values are pulled
+  time_group_stats$p_HpMvsHnM[c] <- chi_gp12$p.value
+  time_group_stats$p_HnMvsHnW[c] <- chi_gp23$p.value
+  time_group_stats$p_HpMvsHnW[c] <- chi_gp13$p.value
+  time_group_stats[c,6:8] <- p.adjust(c(chi_gp12$p.value,chi_gp23$p.value,chi_gp13$p.value), method="bonferroni")
+}
+
+```
+
+###Logistic Regression and Odds Ratios 
+
+Below, odds ratio analysis is performed on the categorical outcomes. The categorical outcomes in the case are the metabolic measures being in the healthy range
+
+```{r}
+
+##Intial Data is selected then T2 and T3 data are adjoined to it and odds ratios are calculated  
+pull_vars <- c("MSM_status","HIV_Status","Diet","StudyID")
+clin_1 <- clin[which(clin$TimepointNumeric==1), which(colnames(clin) %in% pull_vars)]
+
+#Levels have to be specifed for the 
+clin_1$MSM_status <- factor(clin_1$MSM_status, levels=c("MSM","MSW"))
+clin_1$HIV_Status <- factor(clin_1$HIV_Status, levels=c("Positive","Negative"))
+clin_1$Diet <- factor(clin_1$Diet, levels=c("Agrarian","Western"))
+stack_data$InRange <- factor(stack_data$InRange, levels=c("Yes","No"))
+
+#We will use the following factors (factor_vars) to look at odds ratios of outcome variable (out_vars) being in the healthy range at T1 and T3
+factor_vars <- c("MSM_status","HIV_Status","Diet","Baseline")
+out_vars <- met_vars
+time_vars <- c("T2","T3")
+#We will genrate an odds ratio data set
+odds_ratio_data <- unique(expand.grid(factor_vars, out_vars, time_vars))
+colnames(odds_ratio_data) <- c("Factor","Variable", "Timepoint")
+
+odds_ratio_data["pval"] <- NA
+odds_ratio_data["AIC"] <- NA
+odds_ratio_data["estimate"] <- NA
+odds_ratio_data["low"] <- NA
+odds_ratio_data["high"] <- NA
+odds_ratio_data["estimate_pval"] <- NA
+
+#For each outcome variable we will looks at the odds ratios from a logistic regression
+for (j in out_vars) {
+  #For each outcome we pull the data at baseline
+  j_1 <- stack_data[which(stack_data$Measure==j & stack_data$Timepoint=="T1"), which(colnames(stack_data) %in% c("StudyID","Amount","InRange"))]
+  # We also pull the T2 data
+  j_2 <- stack_data[which(stack_data$Measure==j & stack_data$Timepoint=="T2"), which(colnames(stack_data) %in% c("StudyID","Amount","InRange"))]
+  #We also pull the T3 data
+  j_3 <- stack_data[which(stack_data$Measure==j & stack_data$Timepoint=="T3"), which(colnames(stack_data) %in% c("StudyID","Amount","InRange"))]
+  #We then adjoin the data to the clinical baseline day incrementally first adding T1 data and calling the column baseline
+  data_j_1 <- inner_join(clin_1,j_1, by="StudyID")
+  colnames(data_j_1)[(ncol(data_j_1)-1):ncol(data_j_1)] <- c("Amount_Baseline","Baseline")
+  #We then adjoin T2 data and rename the column
+  data_j_2 <- inner_join(data_j_1, j_2, by="StudyID")
+  colnames(data_j_2)[(ncol(data_j_2)-1):ncol(data_j_2)] <-  c("Amount_T2","T2")
+  #We then adjoin T3 data and rename the column
+  data_j <- inner_join(data_j_2, j_3, by="StudyID")
+  colnames(data_j)[(ncol(data_j)-1):ncol(data_j)] <-  c("Amount_T3","T3")
+  #Data is assigned for duture analysis
+  assign(paste0(j,"_long_range_amount_data"),data_j)
+  #The variables are replaced with binary values for logitstic regression
+  #HIV Status
+  data_j$HIV_Status <- gsub("Positive","1",data_j$HIV_Status)  
+  data_j$HIV_Status <- gsub("Negative","0",data_j$HIV_Status)
+  data_j$HIV_Status <- as.numeric(data_j$HIV_Status)
+  #MSM Status
+  data_j$MSM_status <- gsub("MSM","1",data_j$MSM_status)  
+  data_j$MSM_status <- gsub("MSW","0",data_j$MSM_status)
+  data_j$MSM_status <- as.numeric(data_j$MSM_status)
+  #Diet
+  data_j$Diet <- gsub("Agrarian","1",data_j$Diet)  
+  data_j$Diet <- gsub("Western","0",data_j$Diet)
+  data_j$Diet <- as.numeric(data_j$Diet)
+  #Baseline (T1)
+  data_j$Baseline <- gsub("Yes","1",data_j$Baseline)  
+  data_j$Baseline <- gsub("No","0",data_j$Baseline)
+  data_j$Baseline <- as.numeric(data_j$Baseline)
+  #T2
+  data_j$T2 <- gsub("Yes","1",data_j$T2)  
+  data_j$T2 <- gsub("No","0",data_j$T2)
+  data_j$T2 <- as.numeric(data_j$T2)
+  #T3
+  data_j$T3 <- gsub("Yes","1",data_j$T3)  
+  data_j$T3 <- gsub("No","0",data_j$T3)
+  data_j$T3 <- as.numeric(data_j$T3)
+  
+  #Now for all those variables we fill in the odds ratios by first pulling rows for that data
+  j_var_rows <- which(odds_ratio_data$Variable==j)
+  for (j2 in j_var_rows) {
+    #For each row we pull the predictive variable
+    factor_j2 <- as.character(odds_ratio_data$Factor[j2])
+    #We also pull the timepoint
+    tp_j2 <- as.character(odds_ratio_data$Timepoint[j2])
+    #Based on the timepoint we pull the data for that specific timepoint (doing stratified logistic regressions by timepoint)
+    data_j2 <- data_j[,which(colnames(data_j) %in% c("HIV_Status","MSM_status", "Diet","Baseline", tp_j2))]
+    #The Timepoint variable column name is replaced with Outcome for simplicity in the regression model 
+    colnames(data_j2)[which(colnames(data_j2)==tp_j2)] <- "Outcome"
+    # We perfomr a logistic regression
+    model_j2 <- glm(Outcome ~ HIV_Status+MSM_status+Diet+Baseline, data=data_j2)
+    #Summary helps pull other model diagnostics
+    sum_j2 <- summary(model_j2)
+    #We pull p_val and AIC
+    #For the p-value, we perform an anova 
+    anova_result_j2 <- anova(model_j2, test = "Chisq")
+    p_val_j2 <- anova_result_j2$"Pr(>Chi)"[length(anova_result_j2$"Pr(>Chi)")]
+    aic_j2 <- as.numeric(sum_j2$aic)
+    #They are then put in the data set
+    odds_ratio_data$pval[j2] <- p_val_j2
+    odds_ratio_data$AIC[j2] <- aic_j2
+    #We pull the index for the predictive variable (factor_2)
+    coef_ind_j2 <- which(names(model_j2$coefficients)==factor_j2)
+    #We then pull that coefficient
+    coef_j2 <- as.numeric(coef(model_j2)[coef_ind_j2])
+    #We then pull the coefficient 95% CI interval
+    coef_int_j2 <-confint(model_j2)[coef_ind_j2,]
+    #We pull the highs and the lows
+    coef_int_low_j2 <- as.numeric(coef_int_j2[1])
+    coef_int_high_j2 <- as.numeric(coef_int_j2[2])
+    #To compute odds ratios we need to exponentiate the coefficients and intervals
+    or_j2 <- exp(coef_j2)
+    or_low_j2 <- exp(coef_int_low_j2)
+    or_high_j2 <- exp(coef_int_high_j2)
+    #We also pull the estimate p value
+    est_pval_j2 <- as.numeric(sum_j2$coefficients[which(rownames(sum_j2$coefficients)==factor_j2),4])
+    #We then put them in the data set
+    odds_ratio_data$estimate_pval[j2] <- est_pval_j2
+    odds_ratio_data$estimate[j2] <- or_j2
+    odds_ratio_data$low[j2] <- or_low_j2
+    odds_ratio_data$high[j2] <- or_high_j2  
+  }
+}
+
+#Now words are replaced for aesthetics and plotting
+odds_ratio_data$Variable <- gsub("HDL", "HDL-C In Range", odds_ratio_data$Variable)
+odds_ratio_data$Variable <- gsub("LDL", "LDL-C In Range", odds_ratio_data$Variable)
+odds_ratio_data$Variable  <- gsub("Triglycerides", "Triglycerides In Range", odds_ratio_data$Variable )
+odds_ratio_data$Variable <- gsub("HOMAIR", "HOMA-IR In Range", odds_ratio_data$Variable)
+
+odds_ratio_data$Factor <-  gsub("Baseline", "Baseline In Range", odds_ratio_data$Factor)
+odds_ratio_data$Factor <-  gsub("Diet", "Diet = Agrarian", odds_ratio_data$Factor)
+odds_ratio_data$Factor <-  gsub("HIV_Status", "HIV Status = Positive", odds_ratio_data$Factor)
+odds_ratio_data$Factor <-  gsub("MSM_status", "MSM Status = MSM", odds_ratio_data$Factor)
+
+
+# Plot
+Odds_Ratio_Plot <- ggplot(odds_ratio_data, aes(x = estimate, y = Factor)) + 
+        geom_vline(aes(xintercept = 1), size = .25, linetype = "dashed") +
+        geom_errorbarh(aes(xmax = high, xmin = low), size = .5, height = .2, color = "gray50") +
+        geom_point(size = 3.5, color = "orange") +
+        geom_text( x = Inf, y = Inf, label = paste0("p-value=",format(odds_ratio_data$pval, scientific = TRUE, digits = 2)), hjust = 1.1, vjust = 1.1, inherit.aes = FALSE, alpha=0.25)+
+        scale_x_log10() +
+        theme_bw() +
+        labs(y="",x="Odds ratio (log scale)", tag="A")+
+        theme(axis.text.x = element_text(size = 12),
+          axis.title.y = element_blank(),
+          axis.title.x = element_text(size=15),
+          axis.text.y = element_text(size = 12),
+          strip.text.x = element_text(size=15),
+          strip.text.y = element_text(size=10),
+          plot.tag = element_text(size=25),
+          ggh4x.facet.nestline = element_blank(),
+          strip.background.x = element_rect(
+            color="black", fill="gray", linetype="solid"
+          ),
+          strip.background.y = element_rect(
+            color="black", fill="gray", linetype="solid"
+          ))+ 
+        facet_nested(rows=vars(factor(Variable,levels=c("HDL-C In Range","LDL-C In Range","Triglycerides In Range","HOMA-IR In Range"))),
+               cols=vars(Timepoint), 
+               scales="free_y")
+
+
+
+```
+
+###Baseline Delta Comparisons
+
+Below we generate Comparisons between baseline values and deltas 
+
+```{r}
+#We will generate data to consolidate all of the baseline and delta values
+
+baseline_delta_data <- c()
+
+#We also create a Spearman corelation coefficient value
+baseline_delta_spear_data <- c()
+
+for (m in met_vars) {
+  #We pull the data generate above
+  data_m <- get(paste0(m,"_long_range_amount_data"))
+  #We subtract to get deltas
+  data_m["Delta_T2"] <- data_m$Amount_T2-data_m$Amount_Baseline
+  data_m["Delta_T3"] <- data_m$Amount_T3-data_m$Amount_Baseline
+  
+  #We also collect some Spearman correlation data for the values and add them to the Spearman datafile
+  #We coreelate baseline with each delat
+  spear_T2 <- cor.test(data_m$Amount_Baseline,data_m$Delta_T2)
+  spear_T3 <- cor.test(data_m$Amount_Baseline,data_m$Delta_T3)
+  #We put all the data into a matrix
+  spear_data_m <- rbind(c(m,"T2",spear_T2$estimate, spear_T2$p.value),c(m,"T3",spear_T3$estimate, spear_T3$p.value))
+  #We transform the matrix into a data frame
+  spear_data_m <- as.data.frame(spear_data_m)
+  #We name the columns
+  colnames(spear_data_m) <- c("Variable","Timepoint", "Rho", "pval")
+  #We add it to the Spearman data file
+  baseline_delta_spear_data <- rbind(baseline_delta_spear_data, spear_data_m)
+  #We add a constant field to specify the metabolic variable
+  data_m["Variable"] <- m
+  #We pivot to stack the two deltas
+  data_m_long <- pivot_longer(data_m, cols=c("Delta_T2","Delta_T3"), names_to="Timepoint", values_to = "Delta")
+  #We then remove "Delta_" to make it cleaner
+  data_m_long$Timepoint <- gsub("Delta_","",data_m_long$Timepoint)
+  #We now add the data to the complete data set
+  baseline_delta_data <- rbind(baseline_delta_data, data_m_long) 
+}
+
+
+#We adjust the text for visualization
+baseline_delta_data$Variable <- gsub("HDL", "HDL-C (mg/dL)", baseline_delta_data$Variable)
+baseline_delta_data$Variable <- gsub("LDL", "LDL-C (mg/dL)", baseline_delta_data$Variable)
+baseline_delta_data$Variable <- gsub("Triglycerides", "Triglycerides (mg/dL)", baseline_delta_data$Variable)
+baseline_delta_data$Variable <- gsub("HOMAIR", "HOMA-IR", baseline_delta_data$Variable)
+
+baseline_delta_spear_data$Variable <- gsub("HDL", "HDL-C (mg/dL)", baseline_delta_spear_data$Variable)
+baseline_delta_spear_data$Variable <- gsub("LDL", "LDL-C (mg/dL)", baseline_delta_spear_data$Variable)
+baseline_delta_spear_data$Variable <- gsub("Triglycerides", "Triglycerides (mg/dL)", baseline_delta_spear_data$Variable)
+baseline_delta_spear_data$Variable <- gsub("HOMAIR", "HOMA-IR", baseline_delta_spear_data$Variable)
+
+
+#Below we generate a scatter plot with trend lines
+
+Baseline_Delta_Plot <- ggplot(baseline_delta_data, aes(x = Amount_Baseline, y = Delta)) + 
+        geom_point() +
+        geom_smooth(method="loess", se=TRUE)+
+        geom_text(data=baseline_delta_spear_data, x = Inf, y = Inf, label = paste0("Coefficient=",format(as.numeric(baseline_delta_spear_data$Rho), digits = 2)), hjust = 1.2, vjust = 1.2, inherit.aes = FALSE)+
+        geom_text(data=baseline_delta_spear_data, x = Inf, y = Inf, label = paste0("p-value=",format(as.numeric(baseline_delta_spear_data$pval), scientific = TRUE, digits = 2)), hjust = 1.2, vjust = 2.5, inherit.aes = FALSE)+
+        theme_bw() +
+        labs(y="Delta Value",x="Baseline Value", tag="B") +
+        theme(axis.text.x = element_text(size = 12),
+          axis.title.y = element_text(size=15),
+          axis.title.x = element_text(size=15),
+          axis.text.y = element_text(size = 12),
+          strip.text.x = element_text(size=15),
+          strip.text.y = element_text(size=10),
+          plot.tag = element_text(size=25),
+          ggh4x.facet.nestline = element_blank(),
+          strip.background.x = element_rect(
+            color="black", fill="gray", linetype="solid"
+          ),
+          strip.background.y = element_rect(
+            color="black", fill="gray", linetype="solid"
+        ))+ 
+        facet_nested(rows=vars(factor(Variable,levels=c("HDL-C (mg/dL)","LDL-C (mg/dL)","Triglycerides (mg/dL)","HOMA-IR"))),
+               cols=vars(Timepoint), 
+               scales="free",
+               independent="x")
+
+
+#We also create a Spearman corelation coefficient value
+baseline_delta_spear_data_diet <- unique(expand.grid(met_vars, c("Agrarian", "Western"), c("T2","T3")))
+colnames(baseline_delta_spear_data_diet) <- c("Variable", "Diet", "Timepoint")
+baseline_delta_spear_data_diet["Rho"] <- NA
+baseline_delta_spear_data_diet["pval"] <- NA
+
+
+for (m in 1:nrow(baseline_delta_spear_data_diet)) {
+  #First we specify the variable
+  var_m <- baseline_delta_spear_data_diet$Variable[m]
+  #We specify the diet for that row
+  diet_m <- baseline_delta_spear_data_diet$Diet[m]
+  #We pull the timepoint as well 
+  tim_m <- baseline_delta_spear_data_diet$Timepoint[m]
+  #We pull the data generate above
+  data_m_pre <- get(paste0(var_m,"_long_range_amount_data"))
+  #Now we filter by diet
+  data_m <- data_m_pre[which(data_m_pre$Diet==diet_m),]
+  #We include the delta values
+  if (tim_m=="T2") {
+    data_m["Delta"] <- data_m$Amount_T2-data_m$Amount_Baseline
+  } else {
+    data_m["Delta"] <- data_m$Amount_T3-data_m$Amount_Baseline
+  }
+  
+  #We also collect some Spearman correlation data for the values and add them to the Spearman datafile
+  #We correlate baseline with each delat
+  spear_m <- cor.test(data_m$Amount_Baseline,data_m$Delta)
+  baseline_delta_spear_data_diet$Rho[m] <- spear_m$estimate
+  baseline_delta_spear_data_diet$pval[m] <- spear_m$p.value
+}
+
+baseline_delta_spear_data_diet$Variable <- gsub("HDL", "HDL-C (mg/dL)", baseline_delta_spear_data_diet$Variable)
+baseline_delta_spear_data_diet$Variable <- gsub("LDL", "LDL-C (mg/dL)", baseline_delta_spear_data_diet$Variable)
+baseline_delta_spear_data_diet$Variable <- gsub("Triglycerides", "Triglycerides (mg/dL)", baseline_delta_spear_data_diet$Variable)
+baseline_delta_spear_data_diet$Variable <- gsub("HOMAIR", "HOMA-IR", baseline_delta_spear_data_diet$Variable)
+
+
+
+#For plotting I split up the agrarianb and western
+baseline_delta_spear_data_diet_ag <- baseline_delta_spear_data_diet[which(baseline_delta_spear_data_diet$Diet=="Agrarian"),]
+baseline_delta_spear_data_diet_we <- baseline_delta_spear_data_diet[which(baseline_delta_spear_data_diet$Diet=="Western"),]
+
+
+
+#Below we generate a scatter plot with trend lines
+
+Baseline_Delta_Plot_Diet <- ggplot(baseline_delta_data, aes(x = Amount_Baseline, y = Delta, fill=Diet)) + 
+        geom_point() +
+        scale_fill_manual(values=c("darkgreen","darkorange"))+
+        geom_smooth(method="loess", se=TRUE)+
+        geom_text(data=baseline_delta_spear_data_diet_ag, x = Inf, y = Inf, label = paste0("Coefficient=",format(as.numeric(baseline_delta_spear_data_diet_ag$Rho), digits = 2)), hjust = 1.2, vjust = 1.2, inherit.aes = FALSE, color="darkgreen", size = 3)+
+        geom_text(data=baseline_delta_spear_data_diet_ag, x = Inf, y = Inf, label = paste0("p-value=",format(as.numeric(baseline_delta_spear_data_diet_ag$pval), scientific = TRUE, digits = 2)), hjust = 1.2, vjust = 2.5, inherit.aes = FALSE, color="darkgreen", size = 3)+
+        geom_text(data=baseline_delta_spear_data_diet_we, x = Inf, y = Inf, label = paste0("Coefficient=",format(as.numeric(baseline_delta_spear_data_diet_we$Rho), digits = 2)), hjust = 1.2, vjust = 3.8, inherit.aes = FALSE, color="darkorange", size = 3)+
+        geom_text(data=baseline_delta_spear_data_diet_we, x = Inf, y = Inf, label = paste0("p-value=",format(as.numeric(baseline_delta_spear_data_diet_we$pval), scientific = TRUE, digits = 2)), hjust = 1.2, vjust = 5.1, inherit.aes = FALSE, color="darkorange", size = 3)+
+        theme_bw() +
+        labs(y="Delta Value",x="Baseline Value", tag="B") +
+        theme(axis.text.x = element_text(size = 12),
+          axis.title.y = element_text(size=15),
+          axis.title.x = element_text(size=15),
+          axis.text.y = element_text(size = 12),
+          strip.text.x = element_text(size=15),
+          strip.text.y = element_text(size=10),
+          plot.tag = element_text(size=25),
+          ggh4x.facet.nestline = element_blank(),
+          strip.background.x = element_rect(
+            color="black", fill="gray", linetype="solid"
+          ),
+          strip.background.y = element_rect(
+            color="black", fill="gray", linetype="solid"
+        ))+ 
+        facet_nested(rows=vars(factor(Variable,levels=c("HDL-C (mg/dL)","LDL-C (mg/dL)","Triglycerides (mg/dL)","HOMA-IR"))),
+               cols=vars(Timepoint), 
+               scales="free",
+               independent="x")
+
+
+
+```
+
+
+###Odds Ratio Baseline Delta Figure
+
+Below we generate the supplmental figure for logisstic regression and baseline delta comparisons
+
+```{r}
+
+odds_baseline_delta_fig <- ggarrange(Odds_Ratio_Plot,Baseline_Delta_Plot_Diet, nrow=1,ncol=2)
+
+odds_baseline_delta_fig
+
+```
+
+
+###Changes from Healthy to Unhealthy
+
+Below we analyze subjects who went from Healthy to Unhealthy Ranges
+
+```{r}
+
+#We will generate a data set with all the measures and study IDs to see whether they were in the healthy range at different points 
+
+#We will pull the first 
+healthy_amount_range_data <- unique(baseline_delta_data[,1:11])
+
+#Data is pulled from subjects that started out unhealthy but became unhealthy later on
+healthy_unhealthy <- healthy_amount_range_data[which(healthy_amount_range_data$Baseline=="Yes" & healthy_amount_range_data$T3=="No"),]
+
+#Now we pull that subject information
+healthy_unhealthy_subs <- unique(healthy_unhealthy[,which(colnames(healthy_unhealthy) %in% c("MSM_status","HIV_Status","StudyID","Diet"))])
+
+
+```
+
+
+###Longidtudinal Analysis of Unhealthy Baseline Values
+
+Below we do an analysis on subsets of metabolic measures that were in the unhealthy range before 
+
+```{r}
+
+#Below we select IDs from baseline unhealthy values 
+unhealthy_hdl_ids <- stack_data$StudyID[which(stack_data$Timepoint=="T1" & stack_data$Measure=="HDL" & stack_data$InRange=="No")]
+unhealthy_ldl_ids <- stack_data$StudyID[which(stack_data$Timepoint=="T1" & stack_data$Measure=="LDL" & stack_data$InRange=="No")]
+unhealthy_trg_ids <- stack_data$StudyID[which(stack_data$Timepoint=="T1" & stack_data$Measure=="Triglycerides" & stack_data$InRange=="No")]
+unhealthy_hom_ids <- stack_data$StudyID[which(stack_data$Timepoint=="T1" & stack_data$Measure=="HOMAIR" & stack_data$InRange=="No")] 
+
+#Now we pull data on variables that were only in the unhealthy range for that specific variable 
+stack_data_unhealthy_baseline <- stack_data[which((stack_data$Measure=="HDL" & stack_data$StudyID %in% unhealthy_hdl_ids) | (stack_data$Measure=="LDL" & stack_data$StudyID %in% unhealthy_ldl_ids) | (stack_data$Measure=="Triglycerides" & stack_data$StudyID %in% unhealthy_trg_ids) | (stack_data$Measure=="HOMAIR" & stack_data$StudyID %in% unhealthy_hom_ids)),]
+colnames(stack_data_unhealthy_baseline)[7] <- "Variable"
+
+stack_data_unhealthy_baseline <- as.data.frame(stack_data_unhealthy_baseline)
+
+#Below we generate stats:
+unhealthy_long_stats <- long_stat_sum(stack_data_unhealthy_baseline, c("Group","Diet","Variable"),"Timepoint","Amount","StudyID", FALSE)
+
+#Below I do a manual Bonferonni mutliplying all p values by 3 (3 pairwise timepoint comparisons)
+unhealthy_long_stats["padj"] <- unhealthy_long_stats$`p-value`*3
+
+print(unhealthy_long_stats)
+
+
+```
+
+
+###Linear Mixed Effects Models
+
+We correlate factors with outcomes using linear mixed effects models
+
+```{r}
+
+#A linear mixed effects model data set is generated
+#Correlative Factors
+lm_factor_vars <- c("HIV_Status","MSM_status","Diet","TimepointNumeric")
+#Normalized Outcomes
+met_norm_vars <- c("HDLNorm","LDLNorm","TriglyceridesNorm", "HOMAIRNorm")
+
+#We generate an linear mixed effects model data set
+lm_data <- unique(expand.grid(lm_factor_vars, met_norm_vars))
+colnames(lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+lm_data["pval"] <- NA
+lm_data["model_sig"] <- NA
+lm_data["coef"] <- NA
+lm_data["coef_pval"] <- NA
+lm_data["coef_sig"] <- NA
+
+#Now we go throught each outcome variable and modify it 
+for (k in met_norm_vars) {
+  #We pull data to include 
+  data_k <- clin[,which(colnames(clin) %in% c(k,lm_factor_vars,"StudyID"))]
+  #For all the factor variables we change them to numerical variables 
+  #HIV
+  data_k$HIV_Status <- gsub("Positive","1",data_k$HIV_Status)
+  data_k$HIV_Status <- gsub("Negative","0",data_k$HIV_Status)
+  data_k$HIV_Status <- as.numeric(data_k$HIV_Status)
+  #MSM
+  data_k$MSM_status <- gsub("MSM","1",data_k$MSM_status)
+  data_k$MSM_status <- gsub("MSW","0",data_k$MSM_status)
+  data_k$MSM_status <- as.numeric(data_k$MSM_status)
+  #Diet
+  data_k$Diet <- gsub("Agrarian","1",data_k$Diet)
+  data_k$Diet <- gsub("Western","0",data_k$Diet)
+  data_k$Diet <- as.numeric(data_k$Diet)
+  #Timepoint
+  data_k$TimepointNumeric <- as.numeric(data_k$TimepointNumeric)
+  #We change the outcome name for simplicity in running the for loop
+  colnames(data_k)[which(colnames(data_k)==k)] <- "Outcome"
+  data_k$Outcome <- as.numeric(data_k$Outcome)
+  
+  #Now we create the linear mixed effect model
+  lm_model_k <- lmer(Outcome~HIV_Status+MSM_status+Diet+TimepointNumeric+(1|StudyID), data=data_k)
+  #We also generate a summary and pull coefficients
+  lm_sum_k <- summary(lm_model_k)
+  lm_coef_k <- as.data.frame(lm_sum_k$coefficients)
+  #We perform anova to get a p value for the model compared to the null model
+  #First we generate the null model
+  null_model_k <- lmer(Outcome~(1|StudyID), data=data_k)
+  anova_k <- anova(lm_model_k, null_model_k)
+  #We pulll the p-value
+  p_val_k <- anova_k$`Pr(>Chisq)`[2]
+  if (p_val_k<0.05) {
+    sig_k <- "Model Significant"
+  } else {
+    sig_k <- "Model Insignificant"
+  }
+  #Now we fill the values into the data table
+  k_rows <- which(lm_data$Outcome==k)
+  for (k2 in k_rows) {
+    #We enter the p value and significance into the row of the lm_data table
+    lm_data$pval[k2] <- p_val_k
+    lm_data$model_sig[k2] <- sig_k
+    #We then pull th factor/predictor
+    fact_k2 <- as.character(lm_data$Factor[k2])
+    #We pull the row in the coefficient data sek
+    fact_coef_k2_row <- which(rownames(lm_coef_k)==fact_k2)
+    #We then put the factor coefficients and p values in the lm_data table 
+    lm_data$coef[k2] <- lm_coef_k$Estimate[fact_coef_k2_row]
+    lm_data$coef_pval[k2] <- lm_coef_k$`Pr(>|t|)`[fact_coef_k2_row]
+    
+    #Based on the sign of the coefficient and the p value for the factor we put in the coefficient significance 
+    
+    #If the coefficient is positive its a positive relationship and if its negative it indicates a negative relationship
+    if (lm_coef_k$Estimate[fact_coef_k2_row]>0) {
+      lm_data$coef_sig[k2] <- "Positive"
+    } else {
+      lm_data$coef_sig[k2] <- "Negative"
+    }
+    if (lm_coef_k$`Pr(>|t|)`[fact_coef_k2_row]<0.05) {
+      lm_data$coef_sig[k2] <- paste0(lm_data$coef_sig[k2], " (Significant)")
+    }
+  }
+
+}
+
+#Now we plot all the results of the linear mixed effects into one dot plot
+
+#We remove the "Norm" text from the Outcome Fiels
+lm_data["NewOutcome"] <- gsub("Norm","", lm_data$Outcome)
+
+#We Adjust Outcome and Factor Fields for visualization
+lm_data$NewOutcome <- gsub("HOMAIR","HOMA-IR", lm_data$Outcome)
+lm_data["NewFactor"] <- gsub("TimepointNumeric","Timepoint", lm_data$Factor)
+lm_data$NewFactor <- gsub("Diet","Agrarian Diet", lm_data$NewFactor)
+lm_data$NewFactor <- gsub("MSM_status","MSM", lm_data$NewFactor)
+lm_data$NewFactor <- gsub("HIV_Status","HIV-Positive", lm_data$NewFactor)
+
+
+#Now we plot it
+lm_results_plot <- ggplot(lm_data, aes(x = NewOutcome, y = NewFactor, color=coef_sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Plasma Measure", y = " ", fill=" ", tag="A") +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.x = element_text(size = 12, angle=-45, hjust=0),
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 12),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))           
+
+#HDL is significantly correlated with MSM and HIV status so we generate some box plots to show that for to accompany the linear mixed effect model results
+
+#We change to a numeric value
+clin$HDLNorm <- as.numeric(clin$HDLNorm)
+#We will do stratification by diet and timepoint so we generate a combindation
+time_diet_combs <- as.data.frame(unique(expand.grid(clin$Timepoint, clin$Diet)))
+colnames(time_diet_combs) <- c("Timepoint","Diet")
+
+#We generate a blank file and build it out
+HDL_gp_stats <- c()
+
+#Now we go through each combination of stratified time and diet
+for (c in 1:nrow(time_diet_combs)) {
+  #Time and diets are pulled
+  time_c <- time_diet_combs$Timepoint[c]
+  diet_c <- time_diet_combs$Diet[c]
+  data_c <- clin[which(clin$Timepoint==time_c & clin$Diet==diet_c),]
+  #A linear Regression is performed
+  HDL_gp_lm_c <- lm(HDLNorm ~ Group, data=data_c)
+  #An anova is performed on the linear model
+  HDL_gp_anova_c=aov(HDL_gp_lm_c)
+  #A Tukey's test for multiple comparisons
+  HDL_gp_tukey_c <- TukeyHSD(x=HDL_gp_anova_c, 'Group', conf.level=0.95)
+  #We pull out stats
+  HDL_gp_stats_c <- as.data.frame(HDL_gp_tukey_c$Group)
+  #We then pull out the groups
+  HDL_gp_stats_c["group1"] <- substr(rownames(HDL_gp_stats_c),1,9)
+  HDL_gp_stats_c["group2"] <- substr(rownames(HDL_gp_stats_c),11,19)
+  #Diet and Timepoint are added
+  HDL_gp_stats_c["Diet"] <- diet_c
+  HDL_gp_stats_c["Timepoint"] <- time_c
+  if (diet_c=="Agrarian") {
+    HDL_gp_stats_c["y.position"] <- 75
+  } else {
+    HDL_gp_stats_c["y.position"] <- 95
+    
+  }
+  if(!is.null(HDL_gp_stats)) {
+    m <- as.numeric(rownames(HDL_gp_stats)[nrow(HDL_gp_stats)])
+    rownames(HDL_gp_stats_c) <- as.character(c((m+1),(m+2),(m+3)))
+  } else {
+    rownames(HDL_gp_stats_c) <- c("1","2","3")
+  }
+  HDL_gp_stats <- rbind(HDL_gp_stats,HDL_gp_stats_c)
+}
+
+#We add the asterisks
+HDL_gp_stats["p.signif"] <- add_asterisks(HDL_gp_stats$`p adj`)
+
+#Now we generate boxplot
+HDL_gp_box_plot <- ggplot(clin, aes(x=factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")), y=as.numeric(HDLNorm))) +
+                      geom_boxplot(aes(fill=clin$Group))+
+                      geom_jitter()+
+                      scale_fill_manual(values=c("purple","blue","red"))+
+                      labs(y = "Normalized HDL", x = " ", fill="Group", tag="B") +
+                      theme(axis.text.x = element_text(size = 12, angle=-45, hjust=0),
+                        axis.title.y = element_text(size=15),
+                        axis.title.x = element_text(size=15),
+                        axis.text.y = element_text(size = 12),
+                        strip.text.x = element_text(size=15),
+                        strip.text.y = element_text(size=10),
+                        plot.tag = element_text(size=25),
+                        ggh4x.facet.nestline = element_blank(),
+                        strip.background.x = element_rect(
+                          color="black", fill="gray", linetype="solid"
+                        ),
+                        strip.background.y = element_rect(
+                          color="black", fill="gray", linetype="solid"
+                        ))+ 
+                        stat_pvalue_manual(
+                          HDL_gp_stats,
+                          label = "p.signif",
+                          hide.ns = TRUE,
+                          step.increase = 0.1,
+                          step.group.by = c("Timepoint")
+                        ) +
+                        facet_nested(rows=vars(Diet),
+                          cols=vars(Timepoint), 
+                          scales="free")
+
+#Now we combine the plots togethe
+lm_HDL_gp_bp <- ggarrange(lm_results_plot,HDL_gp_box_plot, nrow=1)
+
+
+lm_HDL_gp_bp
+```
+
+
+
+
+### Modelling Outcomes by Compliance
+
+The data are scatter plots 
+
+```{r}
+
+
+#We use linear mixed affects models to assess the relationship between the outcome and the distance to the standard agrarian diet
+
+#Per conversation with Cathy, we have decided to adjust the standard agrarian to be the average of the second timepoint in which those randomized to the agrarian were receiving those meals
+ag_t2_rows <- which(clin$Diet=="Agrarian" & clin$Timepoint=="T2")
+
+diet_vars <- c("Protein_per1000kcal", "Carbs_per1000kcal", "Fat_per1000kcal", "Sodium_per1000kcal", "Sugar_per1000kcal", "Fiber_per1000kcal")
+
+diet_cols <- which(colnames(clin) %in% diet_vars)
+
+#We need to first build out the average vector
+avg_agt2_vec <- c()
+for (m in diet_cols) {
+  avg_agt2_vec_m <- mean(as.numeric(clin[ag_t2_rows,m]), na.rm=TRUE)
+  avg_agt2_vec <- append(avg_agt2_vec,avg_agt2_vec_m)
+}
+
+#We then create a new field that we fill in with the distances
+clin["Dist_to_avg_agt2"] <- NA
+#For each row we calculate the distance to the average vec
+for (r in 1:nrow(clin)) {
+  #First we pull the diet data 
+  diet_r <- as.numeric(clin[r,diet_cols])
+  #Then we calculate the distance 
+  dist_r <- euclidean(diet_r,avg_agt2_vec)
+  clin$Dist_to_avg_agt2[r] <- as.numeric(dist_r)
+}
+
+for (v in met_norm_vars) {
+vdata <- clin
+colnames(vdata)[which(colnames(vdata)==v)] <- "Outcome"
+       vdata$Outcome <- as.numeric(vdata$Outcome)
+assign(paste0(v,"_ag_model"),
+       lmer(Outcome~Dist_to_avg_agt2 + (1|StudyID), data=vdata))  
+assign(paste0(v,"_ag_mixed"),
+       mixed(get(paste0(v,"_ag_model")), data=vdata))  
+assign(paste0(v,"_ag_sum"),
+       summary(get(paste0(v,"_ag_mixed"))))  
+}
+
+#Manual Plotting
+#HDL
+HDLNorm_ag_plot <- ggplot(data = clin,
+                        mapping = aes(x = as.numeric(Dist_to_avg_agt2), y = as.numeric(HDLNorm))) +
+  geom_line(mapping = aes(group = pairing),
+            position = position_dodge(0.1),
+            alpha = 1,
+            size=.1) +
+  geom_point(mapping = aes(fill = Diet.Timepoint, group = pairing),
+             size = 2, shape = 21,
+             position = position_dodge(0.1)) +
+  scale_fill_manual(values=c("lightgreen", "green", "darkgreen", "orange", "orange3", "orange4"))+
+  labs(x="Distance to Standard Agrarian Diet",y="Normalized HDL")+
+  theme_classic() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=25),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )
+)
+
+#LDL
+LDLNorm_ag_plot <- ggplot(data = clin,
+                        mapping = aes(x = as.numeric(StandardAgrarian), y = as.numeric(LDLNorm))) +
+  geom_line(mapping = aes(group = pairing),
+            position = position_dodge(0.1),
+            alpha = 1,
+            size=.1) +
+  geom_point(mapping = aes(fill = Diet.Timepoint, group = pairing),
+             size = 2, shape = 21,
+             position = position_dodge(0.1)) +
+  scale_fill_manual(values=c("lightgreen", "green", "darkgreen", "orange", "orange3", "orange4"))+
+  labs(x="Distance to Standard Agrarian Diet",y="Normalized LDL")+
+  theme_classic() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=15),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )
+)
+
+#Triglycerides
+TriglyceridesNorm_ag_plot <- ggplot(data = clin,
+                        mapping = aes(x = as.numeric(StandardAgrarian), y = as.numeric(TriglyceridesNorm))) +
+  geom_line(mapping = aes(group = pairing),
+            position = position_dodge(0.1),
+            alpha = 1,
+            size=.1) +
+  geom_point(mapping = aes(fill = Diet.Timepoint, group = pairing),
+             size = 2, shape = 21,
+             position = position_dodge(0.1)) +
+  scale_fill_manual(values=c("lightgreen", "green", "darkgreen", "orange", "orange3", "orange4"))+
+  labs(x="Distance to Standard Agrarian Diet",y="Normalized Triglycerides")+
+  theme_classic() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=15),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )
+)
+
+#HOMAIR
+HOMAIRNorm_ag_plot <- ggplot(data = clin,
+                        mapping = aes(x = as.numeric(StandardAgrarian), y = as.numeric(HOMAIRNorm),)) +
+  geom_line(mapping = aes(group = pairing),
+            position = position_dodge(0.1),
+            alpha = 1,
+            size=.1) +
+  geom_point(mapping = aes(fill = Diet.Timepoint, group = pairing),
+             size = 2, shape = 21,
+             position = position_dodge(0.1)) +
+  scale_fill_manual(values=c("lightgreen", "green", "darkgreen", "orange", "orange3", "orange4"))+
+  labs(x="Distance to Standard Agrarian Diet",y="Normalized HOMA-IR")+
+  theme_classic() +
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        axis.text.x = element_text(size = 15, angle=45, hjust=1),
+        axis.title.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.text.y = element_text(size = 15),
+        strip.text.x = element_text(size=12),
+        strip.text.y = element_text(size=15),
+        plot.tag = element_text(size=25),
+        ggh4x.facet.nestline = element_blank(),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )
+)
+
+```
+
+

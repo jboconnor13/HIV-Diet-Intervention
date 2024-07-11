@@ -1,0 +1,335 @@
+---
+title: "DM Baseline Data Analysis"
+author: "J. O'Connor"
+date: "2024-05-09"
+output: html_document
+---
+
+## R Baseline Data Analysis
+
+This is an R Markdown document that includes the R analysis for the study population baseline data.
+
+### Initial Data Loading and Preprocessing
+
+The initial data is loaded
+
+
+```{r Data Loading, echo=FALSE, message=FALSE, warning=FALSE}
+# The Working Directory is Set
+setwd("../..")
+
+# Necessary Packages are Loaded
+library(tableone)
+library(ggplot2)
+library (ggpubr)
+library(tidyr)
+library(reshape2)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(factoextra)
+library(tableone)
+library(dunn.test)
+
+# Necessary Functions are Sourced 
+function_files <- list.files(paste0(getwd(),"/Functions"), pattern = "\\.R$", full.names = TRUE)
+lapply(function_files, source)
+
+# Metadata is pulled in from an excel file
+metadata <- read_xlsx("Data/Metadata/metadata.xlsx", sheet="All")
+
+# Manual MSM edits per Dr. Lozupone's edits
+MSM_spec <- rbind(c("DM001", "MSM", "MSM"),
+                  c("DM002", "MSM", "MSM"),
+                  c("DM007", "MSM", "MSM"),
+                  c("DM010", "MSM", "MSM"),
+                  c("DM021", "MSW", "NonMSM"),
+                  c("DM093", "MSW", "NonMSM"),
+                  c("DM046", "MSM", "MSM"))
+colnames(MSM_spec) <- c("StudyID", "MSM_status", "MSM_status2")
+MSM_spec <- as.data.frame(MSM_spec)
+
+# MSM status changed made to the medadata file 
+
+for (j in 1:nrow(metadata)) {
+  if (metadata$StudyID[j] %in% MSM_spec$StudyID) {
+    MSM_status_j <- unique(MSM_spec$MSM_status[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    MSM_status2_j <- unique(MSM_spec$MSM_status2[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    metadata$MSM_status[j] <-MSM_status_j 
+    metadata$MSM_status2[j] <-MSM_status2_j 
+  }
+}
+
+#A Group field is added to specify HIV and MSM status
+metadata["Group"] <- paste0("HIV-",metadata$HIV_Status,"-",metadata$MSM_status)
+
+#For simpilification "Positive" will be replace with "(+)" and "Negative" will be replaced with "(-)"
+metadata$Group <- gsub("-Positive-","(+)",metadata$Group)
+metadata$Group <- gsub("-Negative-","(-)",metadata$Group)
+
+
+#Clinical data is selected from the filtered metadata to only include men.  
+metadata_filt <- metadata[which(metadata$Group %in% c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),]
+clin <- as.data.frame(metadata_filt)
+
+
+```
+
+
+### Baseline Data is Assessed for Normality 
+
+Clinical variables are selected and tested for normality. 
+
+```{r Normality, echo=FALSE, message=FALSE, warning=FALSE}
+#All baseline variables of interest are pulled out 
+myvars_gp <- c("Age", "BMI", "Diet", "StandardAgrarian", "LBP", "HDL", "LDL", "Triglycerides", "HOMAIR", "IL6", "CRP", "shannon_entropy", "faith_pd", "CD4_count", "CD8_count")
+
+# All continuous variables will be selected and we will test for normailty
+myvars_cont <- c("Age", "BMI","StandardAgrarian", "LBP", "HDL", "LDL", "Triglycerides", "HOMAIR", "IL6", "CRP", "shannon_entropy", "faith_pd", "CD4_count", "CD8_count") 
+
+#Normality is assessed 
+##Blank vectors are generated and filled with normal and not normal variables 
+myvars_cont_norm <- c()
+myvars_cont_non_norm <- c()
+
+#Below Shapiro's tests are used for normality of all continuous variables
+for (j in 1:length(myvars_cont)) {
+  #Variable selected and data pulled 
+  var_j <- myvars_cont[j]
+  var_j_col <- which(colnames(clin)==var_j)
+  clin[,var_j_col] <- as.numeric(clin[,var_j_col])
+  
+  #Normality is assessed by a Shapiro test
+  shap.j <- shapiro.test(clin[,var_j_col])
+  shap.j.p <- shap.j$p.value 
+  
+  #If the p value is under 0.05 it is not normal otherwise it is normal 
+  if (shap.j.p <0.05) {
+    myvars_cont_non_norm <- append(myvars_cont_non_norm, var_j)
+  } else {
+    myvars_cont_norm <- append(myvars_cont_norm, var_j)
+  }
+}
+
+
+#Below we get an indication of which are normal and which are not 
+
+if (length(myvars_cont_norm)>0) {
+  if (length(myvars_cont_norm)>1) {
+    and_var <- myvars_cont_norm[length(myvars_cont_norm)]
+    base_vars <- setdiff(myvars_cont_norm, and_var)
+    base_vars_str <- paste(base_vars, collapse =", ")
+    and_var_str <- paste0(", and", and_var)
+    print(paste0("Variables ", base_vars_str, and_var_str, " are normally distributed")) 
+  } else {
+    print(paste0(myvars_cont_norm, " is normally distributed")) 
+  }
+}
+
+if (length(myvars_cont_non_norm)>0) {
+  if (length(myvars_cont_non_norm)>1) {
+    and_var <- myvars_cont_non_norm[length(myvars_cont_non_norm)]
+    base_vars <- setdiff(myvars_cont_non_norm, and_var)
+    base_vars_str <- paste(base_vars, collapse =", ")
+    and_var_str <- paste0(", and ", and_var)
+    print(paste0("Variables ", base_vars_str, and_var_str, " are NOT normally distributed")) 
+  } else {
+    print(paste0(myvars_cont_non_norm, " is NOT normally distributed")) 
+  }
+}
+
+
+```
+
+###Data Group Quantification and Table Generation
+
+Baseline data is pulled and tables are generated with statistics reflecting normality 
+
+```{r Quantification and Table Generation, echo=FALSE, message=FALSE, warning=FALSE}
+
+#Baseline data is selected 
+clin_1 <- clin[which(clin$TimepointNumeric==1),]
+
+#Baseline tables are generated 
+
+#Main Group
+main_tab_1 <- CreateTableOne(vars=myvars_gp, strata="Group", data=clin_1, argsNormal = myvars_cont_norm, argsNonNormal = myvars_cont_non_norm, includeNA=FALSE, argsExact = "Age")
+print(main_tab_1)
+
+
+##Additional pairwise comparisons
+clin_1.gp12 <- clin_1[which(clin_1$Group %in% c("HIV(+)MSM","HIV(-)MSM")),]
+clin_1.gp13 <- clin_1[which(clin_1$Group %in% c("HIV(+)MSM","HIV(-)MSW")),]
+clin_1.gp23 <- clin_1[which(clin_1$Group %in% c("HIV(-)MSM", "HIV(-)MSW")),]
+
+##Additional pairwise tables are made for Pairwise p-values
+main_tab_1.gp12 <- CreateTableOne(vars=myvars_gp, strata="Group", data=clin_1.gp12, argsNormal = myvars_cont_norm, argsNonNormal = myvars_cont_non_norm)
+main_tab_1.gp13 <- CreateTableOne(vars=myvars_gp, strata="Group", data=clin_1.gp13, argsNormal = myvars_cont_norm, argsNonNormal = myvars_cont_non_norm)
+main_tab_1.gp23 <- CreateTableOne(vars=myvars_gp, strata="Group", data=clin_1.gp23, argsNormal = myvars_cont_norm, argsNonNormal = myvars_cont_non_norm)
+
+```
+
+
+###Post HOC testing
+
+P-values are adjusted for multiple comparisons
+
+```{r Post HOC, echo=FALSE, message=FALSE, warning=FALSE}
+
+#We will conduct a Dunn's Post HOC test on Kruskall Wallace to Adjust for multiple comparisons 
+myvars_post_hoc <- setdiff(myvars_cont_non_norm, c("CD4_count","CD8_count"))
+
+p.adjusted <- c()
+for (j in myvars_post_hoc) {
+  data_temp_j <- clin_1[,which(colnames(clin_1) %in% c("Group",j))]
+  colnames(data_temp_j)[which(colnames(data_temp_j)==j)] <- "Value"
+  assign(paste0("dunn_test",j),dunn.test(data_temp_j$Value,data_temp_j$Group, method="bonferroni"))
+ test_j <- get(paste0("dunn_test",j))
+ p.adjusted_add <- as.data.frame(t(c(j,test_j$P.adjusted)))
+ colnames(p.adjusted_add) <- c("Variable",test_j$comparisons)
+ p.adjusted <- rbind(p.adjusted, p.adjusted_add)
+}
+
+#Same will be done for the categorical variables
+myvars_cat <- setdiff(myvars_gp,myvars_cont)
+
+#We will pull out subsets and do chi-squares followed by p value adjustments
+for (k in myvars_cat) {
+ #We pull the combo names from the p adjusted table to match the columns
+ comb_1 <- c(substr(colnames(p.adjusted)[2],1,9),substr(colnames(p.adjusted)[2],13,21))
+ comb_2 <- c(substr(colnames(p.adjusted)[3],1,9),substr(colnames(p.adjusted)[3],13,21))
+ comb_3 <- c(substr(colnames(p.adjusted)[4],1,9),substr(colnames(p.adjusted)[4],13,21))
+ 
+ #We then generate subsets of data
+ data_temp_k.gp_comb_1 <- clin_1[which(clin_1$Group %in% comb_1),which(colnames(clin_1) %in% c("Group",k))]
+ data_temp_k.gp_comb_2 <- clin_1[which(clin_1$Group %in% comb_2),which(colnames(clin_1) %in% c("Group",k))]
+ data_temp_k.gp_comb_3 <- clin_1[which(clin_1$Group %in% comb_3),which(colnames(clin_1) %in% c("Group",k))]
+ 
+ #We nrename columns to generalize for the chiquare
+ colnames(data_temp_k.gp_comb_1)[which(colnames(data_temp_k.gp_comb_1)==k)] <- "Value"
+ colnames(data_temp_k.gp_comb_2)[which(colnames(data_temp_k.gp_comb_2)==k)] <- "Value"
+ colnames(data_temp_k.gp_comb_3)[which(colnames(data_temp_k.gp_comb_3)==k)] <- "Value"
+ 
+ chi_k_comb_1 <- chisq.test(data_temp_k.gp_comb_1$Group,data_temp_k.gp_comb_1$Value)
+ chi_k_comb_2 <- chisq.test(data_temp_k.gp_comb_2$Group,data_temp_k.gp_comb_2$Value)
+ chi_k_comb_3 <- chisq.test(data_temp_k.gp_comb_3$Group,data_temp_k.gp_comb_3$Value)
+ 
+ bon_adjust_k <- p.adjust(c(chi_k_comb_1$p.value,chi_k_comb_2$p.value,chi_k_comb_3$p.value))
+ p.adjust_cat_k_add <- as.data.frame(t(c(k,bon_adjust_k)))
+ colnames(p.adjust_cat_k_add) <- colnames(p.adjusted)
+ p.adjusted <- rbind(p.adjusted,p.adjust_cat_k_add)
+}
+
+```
+
+###Final Table Generation
+
+Now we ajoin the adjusted pairwise values to the main table
+
+```{r Final Table, echo=FALSE, message=FALSE, warning=FALSE}
+# The Working Directory is Set
+setwd("../..")
+
+#We generate a first line with the number of samples 
+n_gp1 <- nrow(clin_1[which(clin_1$Group=="HIV(+)MSM"),])
+n_gp2 <- nrow(clin_1[which(clin_1$Group=="HIV(-)MSM"),])
+n_gp3 <- nrow(clin_1[which(clin_1$Group=="HIV(-)MSW"),]) 
+
+comb_tab_1 <- as.data.frame(t(c("Sample Number", n_gp1, n_gp2, n_gp3," "," ", " ", " ")))
+colnames(comb_tab_1)<- c("Variable","HIV(+)MSM","HIV(-)MSM","HIV(-)MSW", colnames(p.adjusted))
+
+my_vars_cont_final <- c(myvars_cont,"CD4_count","CD8_count")
+for (v in myvars_gp) {
+  #If it is continuous we take from the continuous data set
+  if (v %in% my_vars_cont_final) {
+    #We pull each group column
+    data_gp1 <- as.data.frame(main_tab_1$ContTable$`HIV(+)MSM`)
+    data_gp2 <- as.data.frame(main_tab_1$ContTable$`HIV(-)MSM`)
+    data_gp3 <- as.data.frame(main_tab_1$ContTable$`HIV(-)MSW`)
+    #From that we pull data for that variable
+    data_gp1_v <- data_gp1[which(rownames(data_gp1)==v),]
+    data_gp2_v <- data_gp2[which(rownames(data_gp2)==v),]
+    data_gp3_v <- data_gp3[which(rownames(data_gp3)==v),]
+    #From that we append meadians and IQR for a text file
+    data_gp1_v_text <- paste0(round(data_gp1_v$median,2), " (", round(data_gp1_v$p25,2),"-",round(data_gp1_v$p75,2),")")
+    data_gp2_v_text <- paste0(round(data_gp2_v$median,2), " (", round(data_gp2_v$p25,2),"-",round(data_gp2_v$p75,2),")")
+    data_gp3_v_text <- paste0(round(data_gp3_v$median,2), " (", round(data_gp3_v$p25,2),"-",round(data_gp3_v$p75,2),")")
+    #We then pull them all together
+    gp_text <- as.data.frame(t(c(paste0(v," (Median (IQR))"),data_gp1_v_text,data_gp2_v_text,data_gp3_v_text)))
+    colnames(gp_text) <- c("Variable","HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")
+    if (v %in% p.adjusted$Variable) {
+      p_adj_v <- p.adjusted[which(p.adjusted$Variable==v),]
+      if (length(which(p_adj_v=="NA"))>0) {
+       gp_text_final <- cbind(gp_text,p_adj_v)  
+      } else {
+        p_adj_v[1,2:4] <- round(as.numeric(p_adj_v[1,2:4]),3)
+        gp_text_final <- cbind(gp_text,p_adj_v)
+      }
+       
+    } else {
+      p_adj_v <- as.data.frame(t(c("NA","NA","NA","NA")))
+      colnames(p_adj_v) <- colnames(p.adjusted)
+      gp_text_final <- cbind(gp_text,p_adj_v) 
+    }
+    comb_tab_1 <- rbind(comb_tab_1,gp_text_final)
+  } else {
+
+    #For categorical variables we do add a blank section above (with p values also)
+    sec_add <- as.data.frame(t(c(v, " ", " ", " ")))
+    colnames(sec_add) <- c("Variable","HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")
+    if (v %in% p.adjusted$Variable) {
+        p_adj_v <- p.adjusted[which(p.adjusted$Variable==v),]
+        if (length(which(p_adj_v=="NA"))>0) {
+         sec_add <- cbind(sec_add,p_adj_v)  
+        } else {
+         p_adj_v[1,2:4] <- round(as.numeric(p_adj_v[1,2:4]),3)
+         sec_add <- cbind(sec_add,p_adj_v)
+        }
+      } else {
+        p_adj_v <- as.data.frame(t(c("NA","NA","NA","NA")))
+        colnames(p_adj_v) <- colnames(p.adjusted)
+        sec_add <- cbind(sec_add,p_adj_v) 
+      }
+    comb_tab_1 <- rbind(comb_tab_1,sec_add)
+    #Because categorical tables are listed, we need to pull out the indeces for each categorical variable
+    v_ind <- which(names(main_tab_1$CatTable$`HIV(-)MSM`)==v)
+    #We pull each data set (which is essentially a frequency table)
+    data_gp1 <- as.data.frame(main_tab_1$CatTable$`HIV(+)MSM`[[v_ind]])
+    data_gp2 <- as.data.frame(main_tab_1$CatTable$`HIV(-)MSM`[[v_ind]])
+    data_gp3 <- as.data.frame(main_tab_1$CatTable$`HIV(-)MSW`[[v_ind]])
+    #From that we pull data for that variable
+    for (v_sub in unique(data_gp1$level)) {
+      data_gp1_v <- data_gp1[which(data_gp1$level==v_sub),]
+      data_gp2_v <- data_gp2[which(data_gp2$level==v_sub),]
+      data_gp3_v <- data_gp3[which(data_gp3$level==v_sub),]
+      #From that we append frequencies and percentages
+      data_gp1_v_text <- paste0(data_gp1_v$freq, " (", round(data_gp1_v$percent,1),"%)")
+      data_gp2_v_text <- paste0(data_gp2_v$freq, " (", round(data_gp2_v$percent,1),"%)")
+      data_gp3_v_text <- paste0(data_gp3_v$freq, " (", round(data_gp3_v$percent,1),"%)")
+      #We then pull them all together
+      gp_text <- as.data.frame(t(c(paste0(v_sub," (Count (%))"),data_gp1_v_text,data_gp2_v_text,data_gp3_v_text)))
+      colnames(gp_text) <- c("Variable","HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")
+        p_adj_v <- as.data.frame(t(c("NA","NA","NA","NA")))
+        colnames(p_adj_v) <- colnames(p.adjusted)
+        gp_text_final <- cbind(gp_text,p_adj_v) 
+        comb_tab_1 <- rbind(comb_tab_1,gp_text_final)
+      }
+    }
+  }
+
+
+final_tab_1 <- cbind(comb_tab_1$Variable,comb_tab_1$`HIV(+)MSM`,comb_tab_1$`HIV(-)MSM`,comb_tab_1$`HIV(-)MSW`,comb_tab_1$`HIV(-)MSM - HIV(+)MSM`,comb_tab_1$`HIV(-)MSM - HIV(-)MSW`,comb_tab_1$`HIV(-)MSW - HIV(+)MSM`)
+
+colnames(final_tab_1) <- c("Variable","HIV(+)MSM","HIV(-)MSM","HIV(-)MSW","HIV(+)MSM vs HIV(-)MSM","HIV(-)MSM vs HIV(-)MSW","HIV(+)MSM vs HIV(-)MSW")
+
+final_tab_1[17:18,3:7] <- "NA"
+write.csv(final_tab_1, file="Data/Exported_from_R/Exported_Table1.csv")
+
+```
+

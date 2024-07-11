@@ -1,0 +1,822 @@
+---
+title: "DM Inflammatory Outcome Analysis"
+author: "J. O'Connor"
+date: "2024-05-14"
+output: html_document
+---
+# R Metabolic Analysis
+
+This is an R Markdown document that includes the R analysis for the inflammatory outcomes in the diet modification study.
+
+### Initial Data Loading and Preprocessing
+
+The initial data is loaded
+
+
+```{r}
+# The Working Directory is Set
+setwd("../..")
+
+# Necessary Packages are Loaded
+library(multcompView)
+library(ggplot2)
+library (ggpubr)
+library(tidyr)
+library(reshape2)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(factoextra)
+library(ggforce)
+library(ggh4x)
+library(lme4)
+library(tidyverse)
+
+# Necessary Functions are Sourced 
+function_files <- list.files(paste0(getwd(),"/Functions"), pattern = "\\.R$", full.names = TRUE)
+lapply(function_files, source)
+
+# Metadata is pulled in from an excel file
+metadata <- read_xlsx("Data/Metadata/metadata.xlsx")
+
+# Manual MSM edits per Dr. Lozupone's edits
+MSM_spec <- rbind(c("DM001", "MSM", "MSM"),
+                  c("DM002", "MSM", "MSM"),
+                  c("DM007", "MSM", "MSM"),
+                  c("DM010", "MSM", "MSM"),
+                  c("DM021", "MSW", "NonMSM"),
+                  c("DM093", "MSW", "NonMSM"),
+                  c("DM046", "MSM", "MSM"))
+colnames(MSM_spec) <- c("StudyID", "MSM_status", "MSM_status2")
+MSM_spec <- as.data.frame(MSM_spec)
+
+# MSM status changed made to the medadata file 
+
+for (j in 1:nrow(metadata)) {
+  if (metadata$StudyID[j] %in% MSM_spec$StudyID) {
+    MSM_status_j <- unique(MSM_spec$MSM_status[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    MSM_status2_j <- unique(MSM_spec$MSM_status2[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    metadata$MSM_status[j] <-MSM_status_j 
+    metadata$MSM_status2[j] <-MSM_status2_j 
+  }
+}
+
+#A Group field is been added manually to link groups based on discussions with collaborators and a pairing field is added that provides a numerical value unique to each studyID
+metadata["Group"] <- paste0("HIV-",metadata$HIV_Status,"-",metadata$MSM_status)
+
+#For simplicity and aesthetics positive and negative are replaces with the symbols 
+metadata$Group <- gsub("-Positive-","(+)",metadata$Group)
+metadata$Group <- gsub("-Negative-","(-)",metadata$Group)
+
+#Clinical data is selected from the Metadata 
+clin <- unique(metadata[which(metadata$Group %in% c("HIV(+)MSM", "HIV(-)MSM", "HIV(-)MSW")),])
+clin <- as.data.frame(clin)
+clin["Diet.Timepoint"] <- paste0(clin$Diet, "-", clin$TimepointNumeric)
+
+#IL6 Outlier is removed 
+clin$IL6[which(clin$StudyID=="DM045")] <- c(NA,NA,NA)
+
+```
+
+### Longitudinal Statistics
+
+Changes in Inflammatory Markers are compared across the study groups
+
+```{r}
+
+#Initial longitudinal statistics are generated
+
+inf_vars <- c("IL6","CRP","LBP")
+
+#Stacked data will be generated for plotting 
+#First we filter the varibales of interest
+stack_data_pre <- clin[,c("StudyID", "Timepoint", "Group", "Diet", inf_vars)]
+#Then we pivot to a longer format
+stack_data <- pivot_longer(stack_data_pre, 
+                           cols=inf_vars,
+                           values_to = "Amount",
+                           names_to = "Measure")
+
+#Each metabolic variable will be compared across the study period using mixed effects linear models
+
+sum_inf_long_stats <- long_stat_sum(clin, c("Group","Diet"),"Timepoint",inf_vars,"StudyID", FALSE)
+print(sum_inf_long_stats)
+
+###Bonferonni Correction
+
+#We do the correction for each measure and group diet subset, so we initially select those combinations with each measure
+
+sum_inf_long_stats_cats <- unique(sum_inf_long_stats[which(colnames(sum_inf_long_stats) %in% c("Group","Diet", "Measure"))])
+
+#A new adjusted p-value field is created
+sum_inf_long_stats["padj"] <- NA
+
+#For each category combo why do a correction for those p values
+for (s in 1:nrow(sum_inf_long_stats_cats)) {
+ group_s <- sum_inf_long_stats_cats$Group[s]
+ diet_s <- sum_inf_long_stats_cats$Diet[s]
+ meas_s <- sum_inf_long_stats_cats$Measure[s]
+ rows_s <- which(sum_inf_long_stats$Group==group_s & sum_inf_long_stats$Diet==diet_s & sum_inf_long_stats$Measure==meas_s)
+ sum_inf_long_stats$padj[rows_s] <- p.adjust(sum_inf_long_stats$`p-value`[rows_s], method="bonferroni")
+}
+
+#A new significance field is defined by the adjusted p values
+sum_inf_long_stats$p.signif <- add_asterisks(sum_inf_long_stats$padj)
+
+
+#Each metabolic variable will also be compared across groups at each point in the study period using t-tests
+
+sum_inf_gp_stats <- gp_stat_sum(clin,"Timepoint",inf_vars,"Diet", FALSE)
+print(sum_inf_gp_stats)
+
+```
+
+### Violin Pots
+
+The data are presented in Violin plots
+
+```{r}
+
+#For plotting the stats will be adjusted to include y-positions and new aschetically pleasing metabolic outcome names 
+
+sum_inf_long_stats["NewMeasure"] <- ""
+sum_inf_long_stats["y.position"] <- NA
+
+for (r in 1:nrow(sum_inf_long_stats)) {
+  if (sum_inf_long_stats$Measure[r]=="IL6") {
+    sum_inf_long_stats$NewMeasure[r] <- "IL-6 (pg/mL)"
+    sum_inf_long_stats$y.position[r] <- 80
+  } else {
+    if (sum_inf_long_stats$Measure[r]=="CRP") {
+      sum_inf_long_stats$NewMeasure[r] <- "CRP (mg/L)"
+      sum_inf_long_stats$y.position[r] <- 8
+    } else {
+      if (sum_inf_long_stats$Measure[r]=="LBP") {
+        sum_inf_long_stats$NewMeasure[r] <- "LBP (ug/uL)"
+        sum_inf_long_stats$y.position[r] <- 40 
+      } 
+    }
+  }
+}
+sum_inf_long_stats$Group <- gsub("-Negative-", "(-)", sum_inf_long_stats$Group)
+sum_inf_long_stats$Group <- gsub("-Positive-", "(+)", sum_inf_long_stats$Group)
+
+stack_data["NewMeasure"] <- ""
+for (r in 1:nrow(stack_data)) {
+  if (stack_data$Measure[r]=="IL6") {
+    stack_data$NewMeasure[r] <- "IL-6 (pg/mL)"
+  } else {
+    if (stack_data$Measure[r]=="CRP") {
+      stack_data$NewMeasure[r] <- "CRP (mg/L)"
+    } else {
+      if (stack_data$Measure[r]=="LBP") {
+        stack_data$NewMeasure[r] <- "LBP (ug/uL)"
+      } 
+  }
+  }
+}
+
+stack_data$Group <- gsub("-Negative-", "(-)", stack_data$Group)
+stack_data$Group <- gsub("-Positive-", "(+)", stack_data$Group)
+
+
+viol_plot <- ggplot(data = stack_data,
+                      mapping = aes(x = Timepoint, y = as.numeric(Amount), fill = Diet)) +
+              geom_violin() +
+              geom_line(mapping = aes(group = StudyID),
+                position = position_dodge(0.1),
+                alpha = 1,
+                size=1) +
+              geom_point(mapping = aes(fill = Diet, group = StudyID),
+                size = 2, shape = 21,
+                position = position_dodge(0.1)) +
+              scale_fill_manual(values=c("darkorange","darkgreen"))+
+              labs(y="Inflammatory Measure", tag="A")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+                stat_pvalue_manual(
+                  sum_inf_long_stats,
+                  label = "p.signif",
+                  hide.ns = TRUE,
+                  step.increase = 0.1,
+                step.group.by = c("Group")
+                ) +
+                facet_nested(rows=vars(NewMeasure),
+                  cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),Diet), 
+                  scales="free_y")
+
+```
+
+
+
+###Baseline Delta Comparisons
+
+Below we generate Comparisons between baseline values and deltas 
+
+```{r}
+ 
+#For each measure we will generate a wide data set across timepoints
+for (i in inf_vars) {
+  data_w_i <- pivot_wider(clin, id_cols=c("StudyID","Diet"),names_from="Timepoint", values_from=i)
+  assign(paste0(i,"_wide_data"),data_w_i)
+}
+
+#We will generate data to consolidate all of the baseline and delta values
+
+baseline_delta_data <- c()
+
+#We also create a Spearman corelation coefficient value
+baseline_delta_spear_data <- c()
+
+for (m in inf_vars) {
+  #We pull the data generate above
+  data_m <- get(paste0(m,"_wide_data"))
+  #For formatting we change the values to numeric 
+  data_m$T1 <- as.numeric(data_m$T1)
+  data_m$T2 <- as.numeric(data_m$T2)
+  data_m$T3 <- as.numeric(data_m$T3)
+  #We subtract to get deltas
+  data_m["Delta_T2"] <- data_m$T2-data_m$T1
+  data_m["Delta_T3"] <- data_m$T3-data_m$T1
+  
+  #We also collect some Spearman correlation data for the values and add them to the Spearman datafile
+  #We coreelate baseline with each delat
+  spear_T2 <- cor.test(data_m$T1,data_m$Delta_T2)
+  spear_T3 <- cor.test(data_m$T1,data_m$Delta_T3)
+  #We put all the data into a matrix
+  spear_data_m <- rbind(c(m,"T2",spear_T2$estimate, spear_T2$p.value),c(m,"T3",spear_T3$estimate, spear_T3$p.value))
+  #We transform the matrix into a data frame
+  spear_data_m <- as.data.frame(spear_data_m)
+  #We name the columns
+  colnames(spear_data_m) <- c("Variable","Timepoint", "Rho", "pval")
+  #We add it to the Spearman data file
+  baseline_delta_spear_data <- rbind(baseline_delta_spear_data, spear_data_m)
+  #We add a constant field to specify the metabolic variable
+  data_m["Variable"] <- m
+  #We pivot to stack the two deltas
+  data_m_long <- pivot_longer(data_m, cols=c("Delta_T2","Delta_T3"), names_to="Timepoint", values_to = "Delta")
+  #We then remove "Delta_" to make it cleaner
+  data_m_long$Timepoint <- gsub("Delta_","",data_m_long$Timepoint)
+  #We now add the data to the complete data set
+  baseline_delta_data <- rbind(baseline_delta_data, data_m_long) 
+}
+
+baseline_delta_data$Variable <- as.character(baseline_delta_data$Variable)
+baseline_delta_spear_data$Variable <- as.character(baseline_delta_spear_data$Variable)
+
+
+#We adjust the text for visualization
+baseline_delta_data["NewVariable"] <- gsub("IL6", "IL-6 (pg/mL)", baseline_delta_data$Variable)
+baseline_delta_data$NewVariable <- gsub("CRP", "CRP (mg/mL)", baseline_delta_data$NewVariable)
+baseline_delta_data$NewVariable <- gsub("LBP","LBP (ug/uL)", baseline_delta_data$NewVariable)
+
+baseline_delta_spear_data["NewVariable"] <- gsub("IL6", "IL-6 (pg/mL)", baseline_delta_spear_data$Variable)
+baseline_delta_spear_data$NewVariable <- gsub("CRP", "CRP (mg/mL)", baseline_delta_spear_data$NewVariable)
+baseline_delta_spear_data$NewVariable <- gsub("LBP","LBP (ug/uL)", baseline_delta_spear_data$NewVariable)
+
+
+#Below we generate a scatter plot with trend lines
+
+Baseline_Delta_Plot <- ggplot(baseline_delta_data, aes(x = T1, y = Delta)) + 
+        geom_point() +
+        geom_smooth(method="loess", se=TRUE)+
+        geom_text(data=baseline_delta_spear_data, x = Inf, y = Inf, label = paste0("Coefficient=",format(as.numeric(baseline_delta_spear_data$Rho), digits = 2)), hjust = 1.2, vjust = 1.2, inherit.aes = FALSE)+
+        geom_text(data=baseline_delta_spear_data, x = Inf, y = Inf, label = paste0("p-value=",format(as.numeric(baseline_delta_spear_data$pval), scientific = TRUE, digits = 2)), hjust = 1.2, vjust = 2.5, inherit.aes = FALSE)+
+        theme_bw() +
+        labs(y="Delta Value",x="Baseline Value", tag="B") +
+        theme(axis.text.x = element_text(size = 12),
+          axis.title.y = element_text(size=15),
+          axis.title.x = element_text(size=15),
+          axis.text.y = element_text(size = 12),
+          strip.text.x = element_text(size=15),
+          strip.text.y = element_text(size=10),
+          plot.tag = element_text(size=25),
+          ggh4x.facet.nestline = element_blank(),
+          strip.background.x = element_rect(
+            color="black", fill="gray", linetype="solid"
+          ),
+          strip.background.y = element_rect(
+            color="black", fill="gray", linetype="solid"
+        ))+ 
+        facet_nested(rows=vars(factor(NewVariable)),
+               cols=vars(Timepoint), 
+               scales="free",
+               independent="x")
+
+#Now we split by Diet
+#We also create a Spearman correlation coefficient value
+baseline_delta_spear_data_diet <- unique(expand.grid(inf_vars, c("Agrarian", "Western"), c("T2","T3")))
+colnames(baseline_delta_spear_data_diet) <- c("Variable", "Diet", "Timepoint")
+baseline_delta_spear_data_diet["Rho"] <- NA
+baseline_delta_spear_data_diet["pval"] <- NA
+
+
+for (m in 1:nrow(baseline_delta_spear_data_diet)) {
+  #First we specify the variable
+  var_m <- as.character(baseline_delta_spear_data_diet$Variable[m])
+  #We specify the diet for that row
+  diet_m <- as.character(baseline_delta_spear_data_diet$Diet[m])
+  #We pull the timepoint as well 
+  tim_m <- as.character(baseline_delta_spear_data_diet$Timepoint[m])
+  #We pull the data generate above
+  data_m_pre <- get(paste0(var_m,"_wide_data"))
+  #Now we filter by diet
+  data_m <- data_m_pre[which(data_m_pre$Diet==diet_m),]
+  #For formatting we need to change to numeric
+  data_m$T1 <- as.numeric(data_m$T1)
+  data_m$T2 <- as.numeric(data_m$T2)
+  data_m$T3 <- as.numeric(data_m$T3)
+  #We include the delta values
+  if (tim_m=="T2") {
+    data_m["Delta"] <- data_m$T2-data_m$T1
+  } else {
+    data_m["Delta"] <- data_m$T3-data_m$T1
+  }
+  
+  #We also collect some Spearman correlation data for the values and add them to the Spearman datafile
+  #We correlate baseline with each delat
+  spear_m <- cor.test(data_m$T1,data_m$Delta)
+  baseline_delta_spear_data_diet$Rho[m] <- spear_m$estimate
+  baseline_delta_spear_data_diet$pval[m] <- spear_m$p.value
+}
+
+baseline_delta_spear_data_diet["NewVariable"] <- gsub("IL6", "IL-6 (pg/mL)", baseline_delta_spear_data_diet$Variable)
+baseline_delta_spear_data_diet$NewVariable <- gsub("CRP", "CRP (mg/mL)", baseline_delta_spear_data_diet$NewVariable)
+baseline_delta_spear_data_diet$NewVariable <- gsub("LBP","LBP (ug/uL)", baseline_delta_spear_data_diet$NewVariable)
+
+
+
+#For plotting I split up the agrarianb and western
+baseline_delta_spear_data_diet_ag <- baseline_delta_spear_data_diet[which(baseline_delta_spear_data_diet$Diet=="Agrarian"),]
+baseline_delta_spear_data_diet_we <- baseline_delta_spear_data_diet[which(baseline_delta_spear_data_diet$Diet=="Western"),]
+
+
+
+#Below we generate a scatter plot with trend lines
+
+Baseline_Delta_Plot_Diet <- ggplot(baseline_delta_data, aes(x = T1, y = Delta, fill=Diet)) + 
+        geom_point() +
+        scale_fill_manual(values=c("darkgreen","darkorange"))+
+        geom_smooth(method="loess", se=TRUE)+
+        geom_text(data=baseline_delta_spear_data_diet_ag, x = Inf, y = Inf, label = paste0("Coefficient=",format(as.numeric(baseline_delta_spear_data_diet_ag$Rho), digits = 2)), hjust = 1.2, vjust = 1.2, inherit.aes = FALSE, color="darkgreen", size = 3)+
+        geom_text(data=baseline_delta_spear_data_diet_ag, x = Inf, y = Inf, label = paste0("p-value=",format(as.numeric(baseline_delta_spear_data_diet_ag$pval), scientific = TRUE, digits = 2)), hjust = 1.2, vjust = 2.5, inherit.aes = FALSE, color="darkgreen", size = 3)+
+        geom_text(data=baseline_delta_spear_data_diet_we, x = Inf, y = Inf, label = paste0("Coefficient=",format(as.numeric(baseline_delta_spear_data_diet_we$Rho), digits = 2)), hjust = 1.2, vjust = 3.8, inherit.aes = FALSE, color="darkorange", size = 3)+
+        geom_text(data=baseline_delta_spear_data_diet_we, x = Inf, y = Inf, label = paste0("p-value=",format(as.numeric(baseline_delta_spear_data_diet_we$pval), scientific = TRUE, digits = 2)), hjust = 1.2, vjust = 5.1, inherit.aes = FALSE, color="darkorange", size = 3)+
+        theme_bw() +
+        labs(y="Delta Value",x="Baseline Value", tag="B") +
+        theme(axis.text.x = element_text(size = 12),
+          axis.title.y = element_text(size=15),
+          axis.title.x = element_text(size=15),
+          axis.text.y = element_text(size = 12),
+          strip.text.x = element_text(size=15),
+          strip.text.y = element_text(size=10),
+          plot.tag = element_text(size=25),
+          ggh4x.facet.nestline = element_blank(),
+          strip.background.x = element_rect(
+            color="black", fill="gray", linetype="solid"
+          ),
+          strip.background.y = element_rect(
+            color="black", fill="gray", linetype="solid"
+        ))+ 
+        facet_nested(rows=vars(NewVariable),
+               cols=vars(Timepoint), 
+               scales="free",
+               independent="x")
+
+
+
+
+#Below we generate a supplementary figure with violin plots and basleine data
+ggarrange(viol_plot,Baseline_Delta_Plot_Diet, nrow=1)
+
+```
+
+
+
+
+###Linear Mixed Effects Models
+
+We correlate factors with outcomes using linear mixed effects models
+
+```{r}
+
+#A linear mixed effects model data set is generated
+#Correlative Factors
+lm_factor_vars <- c("HIV_Status","MSM_status","Diet","TimepointNumeric")
+#Normalized Outcomes
+met_norm_vars <- c("IL6Norm","CRPNorm","LBPNorm")
+
+#We generate an linear mixed effects model data set
+lm_data <- unique(expand.grid(lm_factor_vars, met_norm_vars))
+colnames(lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+lm_data["pval"] <- NA
+lm_data["model_sig"] <- NA
+lm_data["coef"] <- NA
+lm_data["coef_pval"] <- NA
+lm_data["coef_sig"] <- NA
+
+#Now we go throught each outcome variable and modify it 
+for (k in met_norm_vars) {
+  #We pull data to include 
+  data_k <- clin[,which(colnames(clin) %in% c(k,lm_factor_vars,"StudyID"))]
+  #For all the factor variables we change them to numerical variables 
+  #HIV
+  data_k$HIV_Status <- gsub("Positive","1",data_k$HIV_Status)
+  data_k$HIV_Status <- gsub("Negative","0",data_k$HIV_Status)
+  data_k$HIV_Status <- as.numeric(data_k$HIV_Status)
+  #MSM
+  data_k$MSM_status <- gsub("MSM","1",data_k$MSM_status)
+  data_k$MSM_status <- gsub("MSW","0",data_k$MSM_status)
+  data_k$MSM_status <- as.numeric(data_k$MSM_status)
+  #Diet
+  data_k$Diet <- gsub("Agrarian","1",data_k$Diet)
+  data_k$Diet <- gsub("Western","0",data_k$Diet)
+  data_k$Diet <- as.numeric(data_k$Diet)
+  #Timepoint
+  data_k$TimepointNumeric <- as.numeric(data_k$TimepointNumeric)
+  #We change the outcome name for simplicity in running the for loop
+  colnames(data_k)[which(colnames(data_k)==k)] <- "Outcome"
+  data_k$Outcome <- as.numeric(data_k$Outcome)
+  
+  #Now we create the linear mixed effect model
+  lm_model_k <- lmer(Outcome~HIV_Status+MSM_status+Diet+TimepointNumeric+(1|StudyID), data=data_k)
+  #We also generate a summary and pull coefficients
+  lm_sum_k <- summary(lm_model_k)
+  lm_coef_k <- as.data.frame(lm_sum_k$coefficients)
+  #We perform anova to get a p value for the model compared to the null model
+  #First we generate the null model
+  null_model_k <- lmer(Outcome~(1|StudyID), data=data_k)
+  anova_k <- anova(lm_model_k, null_model_k)
+  #We pulll the p-value
+  p_val_k <- anova_k$`Pr(>Chisq)`[2]
+  if (p_val_k<0.05) {
+    sig_k <- "Model Significant"
+  } else {
+    sig_k <- "Model Insignificant"
+  }
+  #Now we fill the values into the data table
+  k_rows <- which(lm_data$Outcome==k)
+  for (k2 in k_rows) {
+    #We enter the p value and significance into the row of the lm_data table
+    lm_data$pval[k2] <- p_val_k
+    lm_data$model_sig[k2] <- sig_k
+    #We then pull th factor/predictor
+    fact_k2 <- as.character(lm_data$Factor[k2])
+    #We pull the row in the coefficient data sek
+    fact_coef_k2_row <- which(rownames(lm_coef_k)==fact_k2)
+    #We then put the factor coefficients and p values in the lm_data table 
+    lm_data$coef[k2] <- lm_coef_k$Estimate[fact_coef_k2_row]
+    lm_data$coef_pval[k2] <- lm_coef_k$`Pr(>|t|)`[fact_coef_k2_row]
+    
+    #Based on the sign of the coefficient and the p value for the factor we put in the coefficient significance 
+    
+    #If the coefficient is positive its a positive relationship and if its negative it indicates a negative relationship
+    if (lm_coef_k$Estimate[fact_coef_k2_row]>0) {
+      lm_data$coef_sig[k2] <- "Positive"
+    } else {
+      lm_data$coef_sig[k2] <- "Negative"
+    }
+    if (lm_coef_k$`Pr(>|t|)`[fact_coef_k2_row]<0.05) {
+      lm_data$coef_sig[k2] <- paste0(lm_data$coef_sig[k2], " (Significant)")
+    }
+  }
+
+}
+
+#Now we plot all the results of the linear mixed effects into one dot plot
+
+#We remove the "Norm" text from the Outcome Fiels
+lm_data["NewOutcome"] <- gsub("Norm","", lm_data$Outcome)
+
+#We Adjust Outcome and Factor Fields for visualization
+lm_data["NewFactor"] <- gsub("TimepointNumeric","Timepoint", lm_data$Factor)
+lm_data$NewFactor <- gsub("Diet","Agrarian Diet", lm_data$NewFactor)
+lm_data$NewFactor <- gsub("MSM_status","MSM", lm_data$NewFactor)
+lm_data$NewFactor <- gsub("HIV_Status","HIV-Positive", lm_data$NewFactor)
+
+
+#Now we plot it
+lm_results_plot <- ggplot(lm_data, aes(x = NewOutcome, y = NewFactor, color=coef_sig)) +
+  scale_color_manual(values=c("blue","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Plasma Measure", y = " ", fill=" ", tag="A") +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.x = element_text(size = 12, angle=-45, hjust=0),
+        axis.title.y = element_blank(),
+        axis.title.x = element_text(size = 15),
+        axis.text.y = element_text(size = 12),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))           
+
+
+
+```
+
+### Modelling Outcomes by Compliance
+
+The data are scatter plots 
+
+```{r}
+
+
+#We use linear mixed affects models to assess the relationship between the outcome and the distance to the standard agrarian diet
+
+#Per conversation with Cathy, we have decided to adjust the standard agrarian to be the average of the second timepoint in which those randomized to the agrarian were receiving those meals
+ag_t2_rows <- which(clin$Diet=="Agrarian" & clin$Timepoint=="T2")
+
+diet_vars <- c("Protein_per1000kcal", "Carbs_per1000kcal", "Fat_per1000kcal", "Sodium_per1000kcal", "Sugar_per1000kcal", "Fiber_per1000kcal")
+
+diet_cols <- which(colnames(clin) %in% diet_vars)
+
+#We need to first build out the average vector
+avg_agt2_vec <- c()
+for (m in diet_cols) {
+  avg_agt2_vec_m <- mean(as.numeric(clin[ag_t2_rows,m]), na.rm=TRUE)
+  avg_agt2_vec <- append(avg_agt2_vec,avg_agt2_vec_m)
+}
+
+#We then create a new field that we fill in with the distances
+clin["Dist_to_avg_agt2"] <- NA
+#For each row we calculate the distance to the average vec
+for (r in 1:nrow(clin)) {
+  #First we pull the diet data 
+  diet_r <- as.numeric(clin[r,diet_cols])
+  #Then we calculate the distance 
+  dist_r <- euclidean(diet_r,avg_agt2_vec)
+  clin$Dist_to_avg_agt2[r] <- as.numeric(dist_r)
+}
+
+#Now we model the markers by dtsance to the standard generating summaries and printing them below
+for (v in met_norm_vars) {
+vdata <- clin
+colnames(vdata)[which(colnames(vdata)==v)] <- "Outcome"
+       vdata$Outcome <- as.numeric(vdata$Outcome)
+assign(paste0(v,"_ag_model"),
+       lmer(Outcome~Dist_to_avg_agt2 + (1|StudyID), data=vdata))  
+assign(paste0(v,"_ag_mixed"),
+       mixed(get(paste0(v,"_ag_model")), data=vdata))  
+assign(paste0(v,"_ag_sum"),
+       summary(get(paste0(v,"_ag_mixed"))))  
+      print(get(paste0(v,"_ag_sum"))) 
+}
+
+```
+
+###Longidtudinal Analysis of Top 50th Percentile
+
+Below we do an analysis on subsets of inflammatory measures that were in the top 50th percentile initally 
+
+```{r}
+
+#First we will generate an additional field indicating if they are above the median
+stack_data["AboveMed"] <- NA
+
+#We need to calculate baseline median values to serve as thresholds
+il6med_t1 <- median(as.numeric(clin$IL6[which(clin$Timepoint=="T1")]), na.rm=TRUE)
+crpmed_t1 <- median(as.numeric(clin$CRP[which(clin$Timepoint=="T1")]), na.rm=TRUE)
+lbpmed_t1 <- median(as.numeric(clin$LBP[which(clin$Timepoint=="T1")]), na.rm=TRUE)
+
+for (s in 1:nrow(stack_data)) {
+  meas_s <- as.character(stack_data$Measure[s])
+  if (meas_s=="IL6") {
+   thresh_s <- il6med_t1  
+  } else {
+    if (meas_s=="CRP") {
+      thresh_s <- crpmed_t1
+    } else {
+      if(meas_s=="LBP") {
+        thresh_s <- lbpmed_t1
+      }
+    }
+  }
+  val_s <- as.numeric(stack_data$Amount[s])
+  if (!is.na(val_s)) {
+    if (val_s>thresh_s) {
+      stack_data$AboveMed[s] <- "Yes"
+    } else {
+      stack_data$AboveMed[s] <- "No"
+    }  
+  }
+  
+}
+
+#Below we select IDs from baseline unhealthy values 
+t50_il6_ids <- stack_data$StudyID[which(stack_data$Timepoint=="T1" & stack_data$Measure=="IL6" & stack_data$AboveMed=="Yes")]
+t50_crp_ids <- stack_data$StudyID[which(stack_data$Timepoint=="T1" & stack_data$Measure=="CRP" & stack_data$AboveMed=="Yes")]
+t50_lbp_ids <- stack_data$StudyID[which(stack_data$Timepoint=="T1" & stack_data$Measure=="LBP" & stack_data$AboveMed=="Yes")]
+
+#Now we pull data on variables that were only in the unhealthy range for that specific variable 
+stack_data_t50_baseline <- stack_data[which((stack_data$Measure=="IL6" & stack_data$StudyID %in% t50_il6_ids) | (stack_data$Measure=="CRP" & stack_data$StudyID %in% t50_crp_ids) | (stack_data$Measure=="LBP" & stack_data$StudyID %in% t50_lbp_ids)),]
+colnames(stack_data_t50_baseline)[7] <- "Variable"
+
+stack_data_t50_baseline <- as.data.frame(stack_data_t50_baseline)
+stack_data_t50_baseline$Amount <- as.numeric(stack_data_t50_baseline$Amount)
+#Below we generate stats:
+t50_long_stats <- long_stat_sum(stack_data_t50_baseline, c("Group","Diet","Variable"),"Timepoint","Amount","StudyID", FALSE)
+
+print(t50_long_stats)
+
+
+```
+
+###IL-6 Plot 
+
+Because high levels of IL-6 appeared to decrease and exhibit somewhat sustained reduction we will do a violin plot for that
+
+```{r}
+
+#First we will select out the stats for IL-6 in HIV(+)MSM 
+il6hivpmsm_stats <- t50_long_stats[which(t50_long_stats$Variable=="IL-6 (pg/mL)" & t50_long_stats$Group=="HIV(+)MSM"),]
+#Then we will pull out the data for IL-6 in HIV(+)MSM
+il6hivpmsm_stack_data <- stack_data[which(stack_data$Group=="HIV(+)MSM" & stack_data$Measure=="IL6"),]
+
+#Now we generate an Il6 Violin Plot
+il6_viol_plot <- ggplot(data = il6hivpmsm_stack_data,
+                      mapping = aes(x = Timepoint, y = as.numeric(Amount), fill = Diet)) +
+              geom_violin() +
+              geom_line(mapping = aes(group = pairing),
+                position = position_dodge(0.1),
+                alpha = 1,
+                size=1) +
+              geom_point(mapping = aes(fill = Diet, group = StudyID),
+                size = 2, shape = 21,
+                position = position_dodge(0.1)) +
+              scale_fill_manual(values=c("darkgreen","darkorange"))+
+              labs(y="IL-6 (pg/mL)")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+                stat_pvalue_manual(
+                  il6hivpmsm_stats,
+                  label = "p.signif",
+                  hide.ns = TRUE,
+                  step.increase = 0.1,
+                  y.position = 30
+                ) +
+                facet_nested(
+                  cols=vars(Diet), 
+                  scales="free_y")
+
+```
+
+### Linear Mixed effects Models 
+
+Determining whether dietary elements relate to metabolic outcomes 
+
+####Patient Components
+
+$$Metabolic Outcome = HIV + MSM + Age + (1|StudyID)$$
+
+
+```{r Basic Dietary LMEM, message=TRUE, warning=TRUE}
+
+met_lmer_data <- clin
+
+met_lmer_data$LBPNorm <- scale(as.numeric(met_lmer_data$LBP))
+met_lmer_data$CRPNorm <- scale(as.numeric(met_lmer_data$CRP))
+met_lmer_data$IL6Norm <- scale(as.numeric(met_lmer_data$IL6))
+
+
+met_lmer_data$MSM_status <- factor(met_lmer_data$MSM_status, levels=c("MSW","MSM"))
+met_lmer_data$HIV_Status <- factor(met_lmer_data$HIV_Status, levels=c("Negative", "Positive"))
+# build models and test for significance 
+
+#The FFQ PC variables are defined
+basic_vars <- c("HIV_Status","MSM_status","Age")
+norm_imm_vars <- c("LBPNorm","CRPNorm","LBPNorm")
+
+#We generate an linear mixed effects model data set
+basic_lm_data <- unique(expand.grid(basic_vars, norm_imm_vars))
+
+colnames(basic_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+basic_lm_data["pval"] <- NA
+basic_lm_data["coef"] <- NA
+basic_lm_data["sig"] <- NA
+
+for (response in norm_imm_vars){ 
+  # create full model 
+  ff <- as.formula(paste0(response,"~  + HIV_Status + MSM_status + Age + (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = met_lmer_data,
+            REML = F)
+
+  for(predictor in basic_vars){ 
+    # create null models 
+    pred <- basic_vars [! basic_vars %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+ (1|StudyID)")))
+    nm <- lmer(nf, 
+               data = met_lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", basic_vars)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+    
+      stat_row <- which(basic_lm_data$Factor==predictor & basic_lm_data$Outcome==response)
+      basic_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      basic_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      basic_lm_data$sig[stat_row] <- sig
+      
+    
+    
+  }
+  
+}
+
+
+#Now we plot those results 
+basic_plot <- ggplot(basic_lm_data, aes(x = Factor, y = Outcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Plasma Measure", y = " ", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+#Now we call the plot
+basic_plot
+```
+

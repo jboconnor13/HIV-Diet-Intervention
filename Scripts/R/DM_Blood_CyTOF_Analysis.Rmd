@@ -1,0 +1,2214 @@
+---
+title: "DM Blood CyTOF ANalysis"
+author: "J. O'Connor"
+date: "2023-10-30"
+output: html_document
+---
+
+## R Baseline Data Analysis
+
+This is an R Markdown document that includes the R analysis for the study population baseline data.
+
+### Initial Data Loading and Preprocessing
+
+The initial data is loaded
+
+
+```{r}
+# The Working Directory is Set
+setwd("..")
+
+#Initial Libraries are loaded
+
+library(compositions) #Version
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(ggfortify)
+library(ggpubr)
+library(stringr)
+library(ggrepel)
+library(mice)
+library(vegan)
+library(ape)
+library(ggpubr)
+library(rstatix)
+library(cowplot)
+library(pheatmap)
+library(randomForest)
+library(VSURF)
+library(ggplot2)
+library (ggpubr)
+library(tidyr)
+library(reshape2)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(factoextra)
+library(httr)
+library(jsonlite)
+library(stringr)
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(afex)
+library(phyloseq)
+library(qiime2R)
+library(vegan)
+library(ape)
+library(ggpubr)
+library(rstatix)
+library(cowplot)
+library(gridExtra)
+library(ggpubr)
+library(jsonlite)
+library(qiime2R)
+library(phyloseq)
+library(readxl)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(lme4)
+library(lmerTest)
+library(afex)
+library(microbiome)
+library(microshades)
+library(speedyseq)
+library(compositions) 
+library(tidyr)
+library(ggforce)
+library(ggh4x)
+library(RColorBrewer)
+library(pheatmap)
+library(ggrepel)
+library(EnhancedVolcano)
+library(mice)
+library(biomformat)
+library(glmmLasso)
+library(stats)
+library(ggplot2)
+
+
+# Necessary Functions are Sourced 
+function_files <- list.files(paste0(getwd(),"/Functions"), pattern = "\\.R$", full.names = TRUE)
+lapply(function_files, source)
+
+# Metadata is pulled in from an excel file
+metadata <- read_xlsx("Data/Metadata/metadata.xlsx")
+
+####Manual MSM edits #####
+
+#Based on individual manual characterizations we altered some unknown MSM statuses
+#Below is the table with the specified MSM statuses
+MSM_spec <- rbind(c("DM001", "MSM", "MSM"),
+                  c("DM002", "MSM", "MSM"),
+                  c("DM007", "MSM", "MSM"),
+                  c("DM010", "MSM", "MSM"),
+                  c("DM021", "MSW", "NonMSM"),
+                  c("DM093", "MSW", "NonMSM"),
+                  c("DM046", "MSM", "MSM"))
+#We name the columns to match the clinical data set
+colnames(MSM_spec) <- c("StudyID", "MSM_status", "MSM_status2")
+MSM_spec <- as.data.frame(MSM_spec)
+
+#We then go through the metadata and manually adjust the avlues
+for (j in 1:nrow(metadata)) {
+  #Is the study ID is in the table we change the values
+  if (metadata$StudyID[j] %in% MSM_spec$StudyID) {
+    MSM_status_j <- unique(MSM_spec$MSM_status[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    MSM_status2_j <- unique(MSM_spec$MSM_status2[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    metadata$MSM_status[j] <-MSM_status_j 
+    metadata$MSM_status2[j] <-MSM_status2_j 
+  }
+}
+#We create simpler names for the fields of interest
+metadata["MSM"] <- metadata$MSM_status2
+metadata["HIV"] <- paste0("HIV-",metadata$HIV_Status)
+metadata["Age"] <- as.numeric((metadata$DateOfVisit-metadata$DOB)/365.25)
+#We adjust rownames to be consistent (studyID combined with the timepoint)
+rownames(metadata) <- paste0(metadata$StudyID,"-",metadata$TimepointNumeric)
+
+#A Group field is been added manually to link groups based on discussions with collaborators 
+metadata["Group"] <- paste0("HIV-",metadata$HIV_Status,"-",metadata$MSM_status)
+
+#For simplicity and aesthetics positive and negative are replaces with the symbols 
+metadata$Group <- gsub("-Positive-","(+)",metadata$Group)
+metadata$Group <- gsub("-Negative-","(-)",metadata$Group)
+
+#Clinical data is selected from the Metadata 
+clin <- unique(metadata[which(metadata$Group %in% c("HIV(+)MSM", "HIV(-)MSM", "HIV(-)MSW")),])
+clin <- as.data.frame(clin)
+clin["Diet.Timepoint"] <- paste0(clin$Diet, "-", clin$TimepointNumeric)
+rownames(clin) <- paste0(clin$StudyID,"-",clin$TimepointNumeric)
+
+#Now we load the Blood CyToF data from an excel file
+bd_cytdata <- read_xlsx("Data/CyTOF/CyTOF_Data.xlsx", sheet="Master Blood (All)", range="A6:EG58")
+
+#Because the excel file is fortmated such that immune cells (varibales) are the rows and samples are the columns we need to adjust for our analyses
+#Also because other sample cohorts are included we only select those with diet modification IDs ("DM")
+bd_cytdata_all <- t(bd_cytdata[,which(substr(colnames(bd_cytdata), 1,2)=="DM")])
+
+#Column names are pulled for the immune cells fields
+colnames(bd_cytdata_all) <- t(bd_cytdata[,1])
+
+#Rownames are generated to include the sample ID and timepoint
+rownames(bd_cytdata_all) <- paste0("DM",substr(rownames(bd_cytdata_all),4,6),"-",substr(rownames(bd_cytdata_all),nchar(rownames(bd_cytdata_all)),nchar(rownames(bd_cytdata_all))))
+#Because "-2" in the CyTOF data corresponds to the "-3" in the metadata we adjust for joining
+rownames(bd_cytdata_all) <- str_replace_all(rownames(bd_cytdata_all), "-2", "-3") 
+
+
+#Now we want to adjoin the clinical data (metadata) to the CyTOF data (bd_cytdata_all)
+
+#We first select clinical variables of interest
+clinvars <- c("StudyID", "HIV","MSM","Diet", "Gender","EnterotypeBaseline","Age","Timepoint","TimepointNumeric", "LBPNorm", "HDLNorm", "LDLNorm", "TriglyceridesNorm", "HOMAIRNorm", "IL6Norm", "CRPNorm", "Group")
+
+#########Start with blood data################################
+#We pull the intersecting IDs (not all metadata is going to have CyTOF data)
+bd_ids <- intersect(rownames(clin),rownames(bd_cytdata_all))
+
+#We then pull both data subsets with those IDs
+meta_data_bd <- clin[which(rownames(clin) %in% bd_ids),which(colnames(clin) %in% clinvars)]
+bd_cytdata_withmet <- bd_cytdata_all[which(rownames(bd_cytdata_all) %in% bd_ids),] 
+
+#We then adjust the rownames to match the source data sets
+rownames(meta_data_bd) <- rownames(clin)[which(rownames(clin) %in% bd_ids)]
+rownames(bd_cytdata_withmet) <- rownames(bd_cytdata_all)[which(rownames(bd_cytdata_all) %in% bd_ids)] 
+
+#We create a blank matrix to put in each data set
+bd_all <- as.data.frame(matrix("",length(bd_ids), length(clinvars)+ncol(bd_cytdata_withmet)))
+
+#We then go through the ids and pull the data into the matrix
+for (i in 1:length(bd_ids)) {
+  id_1 <- bd_ids[i]
+  cln_1 <- meta_data_bd[which(rownames(meta_data_bd)==id_1),] 
+  cyt_1 <- bd_cytdata_withmet[which(rownames(bd_cytdata_withmet)==id_1),]
+  bd_all[i,] <- append(cln_1, cyt_1)
+}
+#We adjust the column names to match the orignal source datasets
+colnames(bd_all) <- append(colnames(meta_data_bd), colnames(bd_cytdata_withmet))
+#We adjust the row names to match everything else (study ID and the timepoint)
+rownames(bd_all) <- paste0(bd_all$StudyID,"-",bd_all$TimepointNumeric)
+
+#Now that all the raw data is combined, we want to see how many samples and features are missing values
+
+#First we assess sample that are missing feature values
+#We generate a blank matrix to add to
+samp_na <- c()
+
+#We then going through the data set to see how many features are missing for each sample (is.na)
+for (s in 1:nrow(bd_cytdata_withmet)) {
+  #First we pull the sample ID
+  samp_s <- rownames(bd_cytdata_withmet)[s]
+  #We see how many features are NA
+  count_s <- length(which(is.na(bd_cytdata_withmet[s,])))
+  #We add to the dataset 
+  samp_na <- rbind(samp_na, c(samp_s, count_s)) 
+}
+
+#We now convert it to a dataframe
+samp_na <- as.data.frame(samp_na)
+
+#We adjust the column names
+colnames(samp_na) <- c("samp", "Count")
+
+#Now we assess features that are missing sample values 
+#We generate a blank matrix to add to
+col_na <- c()
+#We then going through the data set to see how many samples are missing for each feature (is.na)
+for (c in 1:ncol(bd_cytdata_withmet)) {
+  #First we pull the feature
+  col_c <- colnames(bd_cytdata_withmet)[c]
+  #We see how many samples are NA
+  count_c <- length(which(is.na(bd_cytdata_withmet[,c])))
+  #We add to the dataset
+  col_na <- rbind(col_na, c(col_c, count_c)) 
+}
+
+#We now convert it to a dataframe
+col_na <- as.data.frame(col_na)
+
+#We adjust the column names
+colnames(col_na) <- c("col", "Count")
+
+#We filter to include sampels and columns that are less than half unvailable 
+#samp_inc <- samp_na$samp[which(as.numeric(samp_na$Count)<(length(bd_cytdata_withmet[1,])/2))]
+#col_inc <- col_na$col[which(as.numeric(col_na$Count)<(length(bd_cytdata_withmet[,1])/2))]
+samp_inc <- samp_na$samp[which(as.numeric(samp_na$Count)<50)]
+col_inc <- col_na$col[which(as.numeric(col_na$Count)<50)]
+
+#We generate proc (processed) and raw data sets for only the samples and columns we want to include staring first with the base meta data dnsequentially filling the columns out
+bd_all_proc <- bd_all[which(rownames(bd_all) %in% samp_inc),1:ncol(meta_data_bd)]
+bd_all_raw <- bd_all[which(rownames(bd_all) %in% samp_inc),1:ncol(meta_data_bd)]
+
+#Going through the cytof data we pull in the columns in
+for (j in 1:ncol(bd_cytdata_withmet)) {
+  #First we want to see if it is one of the columns we want to include
+  if (colnames(bd_cytdata_withmet)[j] %in% col_inc) {
+    #If it is, we scale the column 
+    normvec <- scale(as.numeric(bd_all[,ncol(meta_data_bd)+j]))
+    #We add the scaled data to the processed data file
+    bd_all_proc <- cbind(bd_all_proc, normvec)
+    #We afdjust the column name of the new added column
+    colnames(bd_all_proc)[ncol(bd_all_proc)] <- paste0(colnames(bd_all)[ncol(meta_data_bd)+j],"_Norm")
+    #We add the raw data to the raw datafile
+    bd_all_raw <- cbind(bd_all_raw, as.numeric(bd_all[,ncol(meta_data_bd)+j]))
+    #We afdjust the column name of the new added column
+    colnames(bd_all_raw)[ncol(bd_all_raw)] <- paste0(colnames(bd_all)[ncol(meta_data_bd)+j],"_Raw")
+  }
+}
+#We convert the matrices into data frames
+bd_all_proc <- as.data.frame(bd_all_proc)
+bd_all_raw <- as.data.frame(bd_all_raw)
+
+
+
+#We perform an imputation using Multivariate Imputation by Chained Equations (mice)
+#We pull the imputable dala (processed) but just the CYTOF fields we want to impute
+n_imp_data <- bd_all_proc[,(ncol(meta_data_bd)+1):ncol(bd_all_proc)]
+#We store the original columns wehich need to be changed for the impuation
+origcol <- colnames(n_imp_data)
+#We rename the columns to allow for impuation
+colnames(n_imp_data) <- paste0("c", 1:ncol(n_imp_data))
+#We generate an impuation model
+imp_model <- mice(n_imp_data)
+#We use the model to omplete the data
+imp_data <- complete(imp_model)
+#Now a new dataset is generated that is both processed and imputed ("proc_imp")
+bd_all_proc_imp <- cbind(bd_all_proc[which(rownames(bd_all_proc) %in% samp_inc),1:ncol(meta_data_bd)], imp_data)
+
+
+#We also export biom format data for the SCINIC Analysis
+#Both the Processed and raw data
+#First Processed
+bd_all_proc_imp_for_biom <- bd_all_proc_imp[,18:ncol(bd_all_proc_imp)]
+origcol_proc_imp <- origcol
+bd_all_proc_imp_biom <- make_biom(t(bd_all_proc_imp_for_biom))
+#Then Raw
+bd_all_raw_for_biom <- bd_all_raw[,18:ncol(bd_all_raw)]
+origcol_raw <- colnames(bd_all_raw_for_biom)
+colnames(bd_all_raw_for_biom) <- paste0("c",1:ncol(bd_all_raw_for_biom))
+bd_all_raw_biom <-  make_biom(t(na.omit(bd_all_raw_for_biom))) 
+#We also export biom format data
+write_biom(bd_all_proc_imp_biom,"Data/Exported_from_R/bd_all_proc.biom")
+write_biom(bd_all_raw_biom,"Data/Exported_from_R/bd_all_raw.biom")
+
+#We also need to store the column names as well
+
+colnames_table <- cbind(paste0("c",1:ncol(bd_all_raw_for_biom)), origcol_raw, origcol_proc_imp)
+
+
+```
+
+###Baseline Differences by HIV and MSM Status
+
+Below we look at differences at baseline by HIV and MSM status
+
+```{r}
+#The column names are switched back 
+colnames(bd_all_proc_imp)[(ncol(meta_data_bd)+1):ncol(bd_all_proc_imp)] <- origcol
+#We initially pull baseline data 
+bd_all_proc_imp_1 <- bd_all_proc_imp[which(bd_all_proc_imp$Timepoint=="T1"),]
+bd_all_proc_imp_1
+#First we pull MSM samples and look at differences by HIV
+
+#First pull the MSM samples from the baseline data
+bd_all_proc_imp_msm_1 <- bd_all_proc_imp_1[which(bd_all_proc_imp_1$MSM=="MSM"),] 
+
+
+#We use generate volcano plot data
+hiv_volc_data_msm1 <- volc_data_generator(bd_all_proc_imp_msm_1, origcol,"HIV",FALSE,TRUE,"StudyID","HIV-Positive")
+
+print(hiv_volc_data_msm1)
+
+#First we pull HIV samples and look at differences by MSM
+
+#First pull the HIV samples from the baseline data
+bd_all_proc_imp_hivn_1 <- bd_all_proc_imp_1[which(bd_all_proc_imp_1$HIV=="HIV-Negative"),] 
+
+#We use generate volcano plot data
+msm_volc_data_hivn1 <- volc_data_generator(bd_all_proc_imp_hivn_1,origcol,"MSM",FALSE,TRUE,"StudyID","MSM")
+
+print(msm_volc_data_hivn1)
+
+```
+
+###Baseline ANOVA
+
+Baseline ANOVA between three groups
+
+```{r}
+#We generate a anova data table to compare across the three groups 
+#We pull the vaaiables from one of the volcano plot generators
+
+anova_gp_data <- as.data.frame(hiv_volc_data_msm1[,1])
+
+#We add data fields
+#One includes the ANOVA p value
+anova_gp_data["anova_p"] <- NA
+
+#Three include the pairwise comparison adjusted p values from Tukey's test
+anova_gp_data[("HIV(+)MSM vs HIV(-)MSM padj")] <- NA
+anova_gp_data[("HIV(-)MSM vs HIV(-)MSW padj")] <- NA
+anova_gp_data[("HIV(+)MSM vs HIV(-)MSW padj")] <- NA
+
+#Now we go through each variable
+for (v in 1:nrow(anova_gp_data)) {
+  #We pull the variable name
+  var_v <- as.character(anova_gp_data[v,1])
+  #We subset the columns to only select the outcome and the group
+  data_v <- bd_all_proc_imp_1[,which(colnames(bd_all_proc_imp_1) %in% c(var_v, "Group"))]
+  #We rename the outcome field
+  colnames(data_v)[which(colnames(data_v)==var_v)] <- "Outcome"
+  data_v$Outcome <- as.numeric(data_v$Outcome)
+  #A linear Regression is performed
+  lm_v <- lm(Outcome ~ Group, data=data_v)
+  #An anova is performed on the linear model
+  anova_v <- aov(lm_v)
+  #We generate one summary to pull a p value
+  sum_v <- summary(anova_v)
+  #We pull a p value
+  anova_gp_data$anova_p[v] <- sum_v[[1]][["Pr(>F)"]][1]
+  #A Tukey's test for multiple comparisons
+  tukey_v <- TukeyHSD(x=anova_v, 'Group', conf.level=0.95)
+  #We pull the pairwise p-values 
+  tukey_padj_v <- as.data.frame(tukey_v$Group)
+  tukey_padj_v["group1"] <- substr(rownames(tukey_padj_v),1,9)
+  tukey_padj_v["group2"] <- substr(rownames(tukey_padj_v),11,19)
+  for (r in 1:3) {
+    group_1_r <- tukey_padj_v$group1[r]
+    group_2_r <- tukey_padj_v$group2[r]
+    for (c in 1:3) {
+      col_c <- colnames(anova_gp_data)[ncol(anova_gp_data)-3+c]
+      col_c_group_1 <- substr(col_c,1,9)
+      col_c_group_2 <- substr(col_c,14,22)
+      col_c_gps <- c(col_c_group_1, col_c_group_2)
+      if (group_1_r %in% col_c_gps & group_2_r %in% col_c_gps) {
+      anova_gp_data[v,(ncol(anova_gp_data)-3+c)] <- tukey_padj_v$`p adj`[r]
+      }
+    }
+  }
+}
+
+anova_gp_data["anova_padj"] <- p.adjust(anova_gp_data$anova_p, method="bonferroni")
+
+
+```
+
+
+###Dietary Changes
+
+Below we generate datasets lookng at how these change across the diets
+
+```{r}
+
+####First we look at the Raw Data
+###Agrarian Diet 
+origcol_raw <- gsub("_Norm","_Raw",origcol)
+#First we pull that data
+bd_all_raw_ag <- bd_all_raw[which(bd_all_raw$Diet=="Agrarian"),]
+#We change the timepoint to a character
+bd_all_raw_ag$Timepoint <- as.character(bd_all_raw_ag$Timepoint)
+#We then generate a volcano plot data of all on that diet
+ag_volc_data_tm_raw <- volc_data_generator(bd_all_raw_ag, origcol_raw,"Timepoint",TRUE,FALSE,"StudyID","T3")
+
+#We generate another file to combine all the data subsets
+ag_volc_data_tm_raw_subs <- ag_volc_data_tm_raw
+ag_volc_data_tm_raw_subs["Subset"] <- "All"
+
+#Now we generate individual volcano data sets for each group 
+un_gps <- unique(bd_all_raw$Group)
+#For each group we will generate a subset and perform differential abundance analysis
+for (g in un_gps) {
+  #We pull that data
+  ag_data_g <- bd_all_raw_ag[which(bd_all_raw_ag$Group==as.character(g)),]
+  #We generate the volcano plot data 
+  ag_g_volc <- volc_data_generator(ag_data_g, origcol_raw,"Timepoint",TRUE,FALSE,"StudyID","T3")
+  #We now name the data
+  ag_g_volc["Subset"] <- g
+  ag_volc_data_tm_raw_subs <- rbind(ag_volc_data_tm_raw_subs, ag_g_volc)
+  assign(paste0("ag_volc_data_tm_raw_",g),ag_g_volc)
+}
+
+
+###Western Diet 
+
+#First we pull that data
+bd_all_raw_we <- bd_all_raw[which(bd_all_raw$Diet=="Western"),]
+#We change the timepoint to a character
+bd_all_raw_we$Timepoint <- as.character(bd_all_raw_we$Timepoint)
+#We then generate a volcano plot data of all on that diet
+we_volc_data_tm_raw <- volc_data_generator(bd_all_raw_we, origcol_raw,"Timepoint",TRUE,FALSE,"StudyID","T3")
+
+#We generate another file to combine all the data subsets
+we_volc_data_tm_raw_subs <- we_volc_data_tm_raw
+we_volc_data_tm_raw_subs["Subset"] <- "All"
+
+#For each group we will generate a subset and perform differential abundance analysis
+for (g in un_gps) {
+  #We pull that data
+  we_data_g <- bd_all_raw_we[which(bd_all_raw_we$Group==as.character(g)),]
+  #We generate the volcano plot data 
+  we_g_volc <- volc_data_generator(we_data_g, origcol_raw,"Timepoint",TRUE,FALSE,"StudyID","T3")
+  #We now name the data
+  we_g_volc["Subset"] <- g
+  we_volc_data_tm_raw_subs <- rbind(we_volc_data_tm_raw_subs, we_g_volc)
+  assign(paste0("we_volc_data_tm_raw_",g),we_g_volc)
+}
+
+
+####Then we use the Processed Data
+###Agrarian Diet 
+
+#First we pull that data
+bd_all_proc_imp_ag <- bd_all_proc_imp[which(bd_all_proc_imp$Diet=="Agrarian"),]
+#We change the timepoint to a character
+bd_all_proc_imp_ag$Timepoint <- as.character(bd_all_proc_imp_ag$Timepoint)
+#We then generate a volcano plot data of all on that diet
+ag_volc_data_tm_proc <- volc_data_generator(bd_all_proc_imp_ag, origcol,"Timepoint",TRUE,TRUE,"StudyID","T3")
+
+#We generate another file to combine all the data subsets
+ag_volc_data_tm_proc_subs <- ag_volc_data_tm_proc
+ag_volc_data_tm_proc_subs["Group"] <- "All"
+
+#Now we generate individual volcano data sets for each group 
+un_gps <- unique(bd_all_proc_imp$Group)
+#For each group we will generate a subset and perform differential abundance analysis
+for (g in un_gps) {
+  #We pull that data
+  ag_data_g <- bd_all_proc_imp_ag[which(bd_all_proc_imp_ag$Group==as.character(g)),]
+  #We generate the volcano plot data 
+  ag_g_volc <- volc_data_generator(ag_data_g, origcol,"Timepoint",TRUE,TRUE,"StudyID","T3")
+  #We now name the data
+  ag_g_volc["Group"] <- g
+  ag_volc_data_tm_proc_subs <- rbind(ag_volc_data_tm_proc_subs, ag_g_volc)
+  assign(paste0("ag_volc_data_tm_proc_",g),ag_g_volc)
+}
+
+
+###Western Diet 
+
+#First we pull that data
+bd_all_proc_imp_we <- bd_all_proc_imp[which(bd_all_proc_imp$Diet=="Western"),]
+#We change the timepoint to a character
+bd_all_proc_imp_we$Timepoint <- as.character(bd_all_proc_imp_we$Timepoint)
+#We then generate a volcano plot data of all on that diet
+we_volc_data_tm_proc <- volc_data_generator(bd_all_proc_imp_we, origcol,"Timepoint",TRUE,TRUE,"StudyID","T3")
+
+#We generate another file to combine all the data subsets
+we_volc_data_tm_proc_subs <- we_volc_data_tm_proc
+we_volc_data_tm_proc_subs["Group"] <- "All"
+
+#For each group we will generate a subset and perform differential abundance analysis
+for (g in un_gps) {
+  #We pull that data
+  we_data_g <- bd_all_proc_imp_we[which(bd_all_proc_imp_we$Group==as.character(g)),]
+  #We generate the volcano plot data 
+  we_g_volc <- volc_data_generator(we_data_g, origcol,"Timepoint",TRUE,TRUE,"StudyID","T3")
+  #We now name the data
+  we_g_volc["Group"] <- g
+  we_volc_data_tm_proc_subs <- rbind(we_volc_data_tm_proc_subs, we_g_volc)
+  assign(paste0("we_volc_data_tm_proc_",g),we_g_volc)
+}
+
+
+#All states combined
+ag_volc_data_tm_proc_subs["Diet"] <- "Agrarian"
+we_volc_data_tm_proc_subs["Diet"] <- "Western"
+
+#We put the stats together
+all_volc_data_tm_proc <- rbind(ag_volc_data_tm_proc_subs,we_volc_data_tm_proc_subs)
+
+#Now we add groups for plotting it
+all_volc_data_tm_proc["group1"] <- "T1"
+all_volc_data_tm_proc["group2"] <- "T3"
+
+all_volc_data_tm_proc_filt <- all_volc_data_tm_proc[which(!is.na(all_volc_data_tm_proc$padj) & all_volc_data_tm_proc$Group=="All"),]
+all_volc_data_tm_proc_filt["p.signif"] <- add_asterisks(all_volc_data_tm_proc_filt$padj)
+colnames(all_volc_data_tm_proc_filt)[1] <- "Cell"
+
+all_volc_data_tm_proc_filt$Cell <- gsub("CD14\\+ Monocytes \\(.*\\)", "CD14+ Monocytes",all_volc_data_tm_proc_filt$Cell)
+
+all_volc_data_tm_proc_filt$Cell <- gsub("_Norm","",all_volc_data_tm_proc_filt$Cell)
+
+all_volc_data_tm_proc_filt <- all_volc_data_tm_proc_filt[which(all_volc_data_tm_proc_filt$padj<.1),]
+```
+
+
+###Violin Plots of Select Cells
+
+We are going to select those that were significant and plot the violin plots
+
+```{r}
+
+#First we select out the significant cells
+
+sig_ag_proc_cells <- ag_volc_data_tm_proc$var_names[which(ag_volc_data_tm_proc$padj<0.1)] 
+
+#Now we stack the data for those values 
+bd_all_proc_imp_sig_long <- pivot_longer(bd_all_proc_imp, cols=sig_ag_proc_cells, names_to="Cell", values_to="Amount")
+bd_all_proc_imp_sig_long$Cell <- gsub("CD14\\+ Monocytes \\(.*\\)", "CD14+ Monocytes",bd_all_proc_imp_sig_long$Cell)
+bd_all_proc_imp_sig_long$Cell <- gsub("_Norm","",bd_all_proc_imp_sig_long$Cell)
+
+#Now we generate a violin plot
+viol_select <- ggplot(data = bd_all_proc_imp_sig_long,
+                      mapping = aes(x = Timepoint, y = as.numeric(Amount), fill = Diet)) +
+              geom_violin() +
+              geom_line(mapping = aes(group = StudyID),
+                position = position_dodge(0.1),
+                alpha = .3,
+                size=1) +
+              geom_point(mapping = aes(fill = Diet, group = StudyID),
+                size = 2, shape = 21,
+                position = position_dodge(0.1)) +
+              scale_fill_manual(values=c("darkgreen","darkorange"))+
+              labs(y="Normalized Percent of Parent")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+                facet_nested(rows=vars(Cell),
+                  cols=vars(Diet), 
+                  scales="free_y")+
+                stat_pvalue_manual(
+                  all_volc_data_tm_proc_filt,
+                  label = "p.signif",
+                  hide.ns = TRUE,
+                  step.increase = 0.1,
+                  y.position=c(5.5,4)
+                ) 
+                
+
+
+```
+
+
+### Linear Mixed effects Models 
+
+Linear modelling is used to compare immune cell populations to patient data, metabolic, and immune markers
+
+####Patient Data
+
+$$Immune Cell = Age + HIV + MSM + Diet + Timepoint + (1|StudyID)$$
+```{r Basic Dietary LMEM, message=TRUE, warning=TRUE}
+
+# build models and test for significance 
+#We generate a new data set for the linear mixed effects modelling
+
+lmer_data <- bd_all_proc_imp
+lmer_data$HIV <- factor(lmer_data$HIV, levels=c("HIV-Negative","HIV-Positive"))
+lmer_data$MSM <- gsub("NonMSM","MSW",as.character(lmer_data$MSM))
+lmer_data$MSM <- factor(lmer_data$MSM, levels=c("MSW","MSM"))
+lmer_data$Diet <- factor(lmer_data$Diet, levels=c("Western","Agrarian"))
+lmer_data$Timepoint <- factor(lmer_data$Timepoint, levels=c("T1","T3"))
+lmer_data$Age <- as.numeric(lmer_data$Age)
+
+#The patient vars are defined
+patient_vars <- c("Age","HIV","MSM","Diet","Timepoint")
+
+#The cells are pulled from the data set 
+#First we need to remove the "_Norm" to avoid errors
+orig_lmer_cols <- colnames(lmer_data)[18:ncol(lmer_data)]
+colnames(lmer_data)[18:ncol(lmer_data)] <- paste0("c_",18:ncol(lmer_data))
+
+cell_vars <- colnames(lmer_data)[18:ncol(lmer_data)]
+#I set up a basic diet data set for the linear mixed effects results
+
+#We generate an linear mixed effects model data set
+patient_lm_data <- unique(expand.grid(patient_vars, cell_vars))
+colnames(patient_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+patient_lm_data["pval"] <- NA
+#One for the coefficient
+patient_lm_data["coef"] <- NA
+#One for the significance label
+patient_lm_data["sig"] <- NA
+#One field for displayng the actual cell values
+patient_lm_data["DisplayOutcome"] <- NA
+
+for (response in cell_vars){ 
+  # create full model 
+  ff <- as.formula(paste0(response," ~ Age + HIV + MSM + Diet + Timepoint + (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = lmer_data,
+            REML = F)
+
+  for(predictor in patient_vars){ 
+    # create null models 
+    pred <- patient_vars[! patient_vars %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", patient_vars)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+      stat_row <- which(patient_lm_data$Factor==predictor & patient_lm_data$Outcome==response)
+      patient_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      patient_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      patient_lm_data$sig[stat_row] <- sig
+      
+  #We pull the display name
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  patient_lm_data$DisplayOutcome[stat_row] <- display_name     
+    
+  }
+
+  
+}
+
+
+#Now we plot those results 
+patient_lm_plot <- ggplot(patient_lm_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+#Now we call the plot
+patient_lm_plot
+
+#For simplicity we will focus on the significant variables 
+sig_cells <- unique(patient_lm_data$DisplayOutcome[which(patient_lm_data$pval<0.05)])
+
+#We pull the data for those cells
+sig_cell_data <- patient_lm_data[which(patient_lm_data$DisplayOutcome %in% sig_cells),]
+
+#Now we plot those results
+sig_patient_lm_plot <- ggplot(sig_cell_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+sig_patient_lm_plot
+
+```
+
+
+####Patient Data Interaction Terms
+
+$$Immune Cell = Age + HIV + MSM + Timepoint + (Diet*Timepoint) + (1|StudyID)$$
+```{r Basic Dietary LMEM, message=TRUE, warning=TRUE}
+
+# build models and test for significance 
+#We generate a new data set for the linear mixed effects modelling including the 
+
+patient_vars_int <- c("Age","HIV","MSM", "(Diet*Timepoint)")
+
+#We generate an linear mixed effects model data set
+patient_int_lm_data <- unique(expand.grid(patient_vars_int, cell_vars))
+colnames(patient_int_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+patient_int_lm_data["pval"] <- NA
+#One for the coefficient
+patient_int_lm_data["coef"] <- NA
+#One for the significance label
+patient_int_lm_data["sig"] <- NA
+#One field for displayng the actual cell values
+patient_int_lm_data["DisplayOutcome"] <- NA
+
+for (response in cell_vars){ 
+  # create full model 
+  ff <- as.formula(paste0(response," ~ Age + HIV + MSM + (Diet*Timepoint) + (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = lmer_data,
+            REML = F)
+
+  for(predictor in patient_vars_int){ 
+    # create null models 
+    pred <- patient_vars_int[! patient_vars_int %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", patient_vars_int)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+      stat_row <- which(patient_int_lm_data$Factor==predictor & patient_int_lm_data$Outcome==response)
+      patient_int_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      patient_int_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      patient_int_lm_data$sig[stat_row] <- sig
+      
+  #We pull the display name
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  patient_int_lm_data$DisplayOutcome[stat_row] <- display_name     
+    
+  }
+
+  
+}
+
+
+#Now we plot those results 
+patient_int_lm_plot <- ggplot(patient_int_lm_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+#Now we call the plot
+patient_int_lm_plot
+
+#For simplicity we will focus on the significant variables 
+int_sig_cells <- unique(patient_int_lm_data$DisplayOutcome[which(patient_int_lm_data$pval<0.05)])
+
+#We pull the data for those cells
+int_sig_cell_data <- patient_int_lm_data[which(patient_int_lm_data$DisplayOutcome %in% int_sig_cells),]
+
+#Now we plot those results
+sig_patient_int_lm_plot <- ggplot(int_sig_cell_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+sig_patient_int_lm_plot
+
+```
+####Metabolic and Inflammatory Data
+
+$$Immune Cell = HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)$$
+
+```{r}
+
+#Make sure all the continuous variables are numeric
+
+lmer_data$HDLNorm <-  as.numeric(lmer_data$HDLNorm)
+lmer_data$LDLNorm <-  as.numeric(lmer_data$LDLNorm)
+lmer_data$TriglyceridesNorm <-  as.numeric(lmer_data$TriglyceridesNorm)
+lmer_data$IL6Norm <-  as.numeric(lmer_data$IL6Norm)
+lmer_data$LBPNorm <-  as.numeric(lmer_data$LBPNorm)
+lmer_data$CRPNorm <-  as.numeric(lmer_data$CRPNorm)
+
+#The patient vars are defined
+met_inf_vars <- c("HDLNorm","LDLNorm","TriglyceridesNorm","IL6Norm","LBPNorm","CRPNorm")
+
+
+#I set up a basic diet data set for the linear mixed effects results
+
+#We generate an linear mixed effects model data set
+met_inf_lm_data <- unique(expand.grid(met_inf_vars, cell_vars))
+colnames(met_inf_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+met_inf_lm_data["pval"] <- NA
+#One for the coefficient
+met_inf_lm_data["coef"] <- NA
+#One for the significance label
+met_inf_lm_data["sig"] <- NA
+#One field for displayng the actual cell values
+met_inf_lm_data["DisplayOutcome"] <- NA
+
+for (response in cell_vars){ 
+  # create full model 
+  ff <- as.formula(paste0(response," ~ HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = lmer_data,
+            REML = F)
+
+  for(predictor in met_inf_vars){ 
+    # create null models 
+    pred <- met_inf_vars[! met_inf_vars %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", met_inf_vars)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+      stat_row <- which(met_inf_lm_data$Factor==predictor & met_inf_lm_data$Outcome==response)
+      met_inf_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      met_inf_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      met_inf_lm_data$sig[stat_row] <- sig
+    #We pull the display name
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  met_inf_lm_data$DisplayOutcome[stat_row] <- display_name     
+
+  }
+  
+}
+
+
+
+#Now we plot those results 
+met_inf_lm_plot <- ggplot(met_inf_lm_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+#Now we call the plot
+met_inf_lm_plot
+
+#For simplicity we will focus on the significant variables 
+met_inf_sig_cells <- unique(met_inf_lm_data$DisplayOutcome[which(met_inf_lm_data$pval<0.05)])
+
+#We pull the data for those cells
+met_inf_sig_cell_data <- met_inf_lm_data[which(met_inf_lm_data$DisplayOutcome %in% met_inf_sig_cells),]
+
+#Now we plot those results
+sig_met_inf_lm_plot <- ggplot(met_inf_sig_cell_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+
+```
+
+####All Together
+
+$$Immune Cell = HIV + MSM + Diet + Timepoint+HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)$$
+
+```{r}
+
+#The patient vars are defined
+all_vars <- c(met_inf_vars, patient_vars)
+
+
+#I set up a basic diet data set for the linear mixed effects results
+
+#We generate an linear mixed effects model data set
+all_lm_data <- unique(expand.grid(all_vars, cell_vars))
+colnames(all_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+all_lm_data["pval"] <- NA
+#One for the coefficient
+all_lm_data["coef"] <- NA
+#One for the significance label
+all_lm_data["sig"] <- NA
+#One field for displayng the actual cell values
+all_lm_data["DisplayOutcome"] <- NA
+
+for (response in cell_vars){ 
+  # create full model 
+  ff <- as.formula(paste0(response," ~ Age + HIV + MSM + Diet + Timepoint+HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = lmer_data,
+            REML = F)
+
+  for(predictor in all_vars){ 
+    # create null models 
+    pred <- all_vars[! all_vars %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", all_vars)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+      stat_row <- which(all_lm_data$Factor==predictor & all_lm_data$Outcome==response)
+      all_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      all_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      all_lm_data$sig[stat_row] <- sig
+    #We pull the display name
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  all_lm_data$DisplayOutcome[stat_row] <- display_name     
+
+  }
+  
+}
+
+
+
+#Now we plot those results 
+all_lm_plot <- ggplot(all_lm_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+#For simplicity we will focus on the significant variables 
+all_sig_cells <- unique(all_lm_data$DisplayOutcome[which(all_lm_data$pval<0.05)])
+
+#We pull the data for those cells
+all_sig_cell_data <- all_lm_data[which(all_lm_data$DisplayOutcome %in% all_sig_cells),]
+
+#Now we plot those results
+sig_all_lm_plot <- ggplot(all_sig_cell_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+sig_all_lm_plot
+
+```
+
+
+####Backward Selection
+
+Below we perform backward selection as was done in the Zim1 analysis to compare the immune cell populations  
+
+#####Fixed Terms
+
+```{r}
+
+#We generate an linear mixed effects model data set
+bw_lm_data <- unique(expand.grid(all_vars, cell_vars))
+colnames(bw_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+bw_lm_data["pval"] <- NA
+#One for the coefficient
+bw_lm_data["coef"] <- NA
+#One for the significance label
+bw_lm_data["sig"] <- "Not in the Model"
+#One field for displayng the actual cell values
+bw_lm_data["DisplayOutcome"] <- NA
+
+#Now we go through and relate and perform the backward selection
+for (response in cell_vars){ 
+  #We create a minimal model for the step function
+  minf <- as.formula(paste0(response," ~ (1|StudyID)"))
+  # We then create the model
+  minm <- lmer(minf, data = lmer_data, REML = F)
+  # create full backward model formula
+  bwf <- as.formula(paste0(response," ~ Age + HIV + MSM + Diet + Timepoint + HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)"))
+  # We then create the model
+  bwm <- lmer(bwf, data = lmer_data, REML = F)
+  #We then use step for backward selection
+  bwd <- step(bwm, 
+            trace = 1, 
+            direction = "backward", 
+            scope = list(lower = minm, upper = bwm))
+  #We now pull the fixed variables
+  fixed_vars <- as.data.frame(bwd$fixed)
+  
+  #We now pull the selected variables
+  selected_vars <- rownames(fixed_vars)[which(fixed_vars$Eliminated==0)]
+  selected_term <- paste0(selected_vars, collapse = "+")
+  
+  #Now we do a new full model  
+  ff <- as.formula(paste0(response," ~", selected_term ,"+ (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = lmer_data,
+            REML = F)
+  
+  for(predictor in selected_vars){ 
+    # create null models 
+    pred <- selected_vars[! selected_vars %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", selected_vars)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+      stat_row <- which(bw_lm_data$Factor==predictor & bw_lm_data$Outcome==response)
+      bw_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      bw_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      bw_lm_data$sig[stat_row] <- sig
+    #We pull the display name
+  #For statistics on the entire model we need to do anova comparing to the complete null model 
+  overall_nf <- as.formula((paste0(response, "~(1|StudyID)")))
+  overall_nm <- lmer(overall_nf, 
+               data = lmer_data, 
+               REML = F)
+  overall_res <- anova(overall_nm, fm)
+  overall_p_signif <- add_asterisks(overall_res$`Pr(>Chisq)`[2])
+  
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name_pre <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  #We also add the significance
+  display_name <-paste0(display_name_pre, " (",overall_p_signif,") ")
+  bw_lm_data$DisplayOutcome[stat_row] <- display_name     
+
+  }
+  
+}
+
+#We remove those not included in the model
+
+bw_lm_data_filt <- bw_lm_data[!is.na(bw_lm_data$DisplayOutcome),]
+#Now we plot those results 
+bw_lm_plot <- ggplot(bw_lm_data_filt, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+
+```
+
+
+#####Interaction Terms
+
+
+```{r}
+
+all_vars_int <- c(met_inf_vars, patient_vars_int)
+
+#We generate an linear mixed effects model data set
+bw_int_lm_data <- unique(expand.grid(all_vars_int, cell_vars))
+colnames(bw_int_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+bw_int_lm_data["pval"] <- NA
+#One for the coefficient
+bw_int_lm_data["coef"] <- NA
+#One for the significance label
+bw_int_lm_data["sig"] <- "Not in the Model"
+#One field for displayng the actual cell values
+bw_int_lm_data["DisplayOutcome"] <- NA
+
+#Now we go through and relate and perform the backward selection
+for (response in cell_vars){ 
+#  response="c_51"
+  #We create a minimal model for the step function
+  minf <- as.formula(paste0(response," ~ (Diet*Timepoint)+(1|StudyID)"))
+  # We then create the model
+  minm <- lmer(minf, data = lmer_data, REML = F)
+  # create full backward model formula
+  bwf <- as.formula(paste0(response," ~ Age + HIV + MSM + (Diet*Timepoint) + HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)"))
+  # We then create the model
+  bwm <- lmer(bwf, data = lmer_data, REML = F)
+  #We then use step for backward selection
+  bwd <- step(bwm, 
+            trace = 1, 
+            direction = "backward", 
+            scope = list(lower = minm, upper = bwm))
+  #We now pull the fixed variables
+  fixed_vars <- as.data.frame(bwd$fixed)
+  
+  #We now pull the selected variables
+  selected_vars_pre <- rownames(fixed_vars)[which(fixed_vars$Eliminated==0)]
+  selected_vars <- gsub("Diet:Timepoint","(Diet*Timepoint)",selected_vars_pre)
+  selected_term <- paste0(selected_vars, collapse = "+")
+  
+  #Now we do a new full model  
+  ff <- as.formula(paste0(response," ~", selected_term ,"+ (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = lmer_data,
+            REML = F)
+  
+  for(predictor in selected_vars){ 
+    # create null models 
+    pred <- selected_vars[! selected_vars %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", selected_vars)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+       stat_row <- which(bw_int_lm_data$Factor==predictor & bw_int_lm_data$Outcome==response) 
+      bw_int_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      bw_int_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      bw_int_lm_data$sig[stat_row] <- sig
+    #We pull the display name
+  #For statistics on the entire model we need to do anova comparing to the complete null model 
+  overall_nf <- as.formula((paste0(response, "~(1|StudyID)")))
+  overall_nm <- lmer(overall_nf, 
+               data = lmer_data, 
+               REML = F)
+  overall_res <- anova(overall_nm, fm)
+  overall_p_signif <- add_asterisks(overall_res$`Pr(>Chisq)`[2])
+  
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name_pre <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  #We also add the significance
+  display_name <-paste0(display_name_pre, " (",overall_p_signif,") ")
+  bw_int_lm_data$DisplayOutcome[stat_row] <- display_name     
+
+  }
+  
+}
+
+#We remove those not included in the model
+
+bw_int_lm_data_filt <- bw_int_lm_data[!is.na(bw_int_lm_data$DisplayOutcome),]
+#Now we plot those results 
+bw_int_lm_plot <- ggplot(bw_int_lm_data_filt, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+
+```
+
+#####Test Plots
+```{r}
+
+nk_plot <- ggplot(data = lmer_data, aes(x = HIV, y = as.numeric(c_62), fill=Diet)) + 
+            geom_boxplot(outliers = F)+
+          geom_jitter(aes(group=Diet))+
+          scale_fill_manual(values=c("darkorange","darkgreen"))+
+              labs(y="NK Cells (% of CD3- CD45+)")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+          facet_nested(cols=vars(Timepoint))
+          
+
+nk_c20_plot <- ggplot(data = lmer_data, aes(x = MSM, y = as.numeric(c_20), fill=Diet)) + 
+            geom_boxplot(outliers = F)+
+          geom_jitter(aes(group=Diet))+
+          scale_fill_manual(values=c("darkorange","darkgreen"))+
+              labs(y="CD3+ CD56+ NK T Cells")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+          facet_nested(cols=vars(Timepoint))
+
+cd4_cd40_plot <- ggplot(data = lmer_data, aes(x = Group, y = as.numeric(c_24), fill=Diet)) + 
+            geom_boxplot(outliers = F)+
+          geom_jitter(aes(group=Diet))+
+          scale_fill_manual(values=c("darkorange","darkgreen"))+
+              labs(y="CD4+ CD40+ Cells")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) +
+          facet_nested(cols=vars(Timepoint))
+
+
+cd8_cd40_plot <- ggplot(data = lmer_data, aes(x = Timepoint, y = as.numeric(c_46), fill=Diet)) + 
+            geom_boxplot(outliers = F)+
+          geom_jitter(aes(group=Diet))+
+          scale_fill_manual(values=c("darkorange","darkgreen"))+
+              labs(y="CD8+ CD40+ Cells")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ))
+
+
+
+cd4_mono_plot <- ggplot(data = lmer_data, aes(x = Timepoint, y = as.numeric(c_63), fill=Diet)) + 
+            geom_boxplot(outliers = F)+
+          geom_jitter(aes(group=Diet))+
+          scale_fill_manual(values=c("darkorange","darkgreen"))+
+              labs(y="CD14+ Monocytes")+
+              theme_classic() +
+              theme(legend.position = "bottom",
+                legend.title = element_text(size = 20),
+                legend.text = element_text(size = 20),
+                axis.text.x = element_text(size = 15),
+                axis.title.y = element_text(size = 20),
+                axis.title.x = element_blank(),
+                axis.text.y = element_text(size = 15),
+                strip.text.x = element_text(size=12),
+                strip.text.y = element_text(size=10),
+                plot.tag = element_text(size=25),
+                ggh4x.facet.nestline = element_blank(),
+                strip.background.x = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                ),
+                strip.background.y = element_rect(
+                  color="black", fill="gray", linetype="solid"
+                )) 
+
+```
+
+
+####Agrarian Diet
+
+$$Immune Cell = Age + HIV + MSM + Timepoint + (1|StudyID)$$
+```{r Basic Dietary LMEM, message=TRUE, warning=TRUE}
+
+#First we focus on Agrarian diet
+ag_lmer_data <- lmer_data %>% 
+                  filter(Diet=="Agrarian")
+
+# build models and test for significance 
+#We generate a new data set for the linear mixed effects modelling including the 
+patient_vars_ag <- c("Age","HIV","MSM", "Timepoint")
+
+#We generate an linear mixed effects model data set
+patient_ag_lm_data <- unique(expand.grid(patient_vars_ag, cell_vars))
+colnames(patient_ag_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+patient_ag_lm_data["pval"] <- NA
+#One for the coefficient
+patient_ag_lm_data["coef"] <- NA
+#One for the significance label
+patient_ag_lm_data["sig"] <- NA
+#One field for displayng the actual cell values
+patient_ag_lm_data["DisplayOutcome"] <- NA
+
+for (response in cell_vars){ 
+  # create full model 
+  ff <- as.formula(paste0(response," ~ Age + HIV + MSM + Timepoint + (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = ag_lmer_data,
+            REML = F)
+
+  for(predictor in patient_vars_ag){ 
+    # create null models 
+    pred <- patient_vars_ag[! patient_vars_ag %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = ag_lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", patient_vars_ag)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+      stat_row <- which(patient_ag_lm_data$Factor==predictor & patient_ag_lm_data$Outcome==response)
+      patient_ag_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      patient_ag_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      patient_ag_lm_data$sig[stat_row] <- sig
+      
+  #We pull the display name
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  patient_ag_lm_data$DisplayOutcome[stat_row] <- display_name     
+    
+  }
+
+  
+}
+
+
+#Now we plot those results 
+patient_ag_lm_plot <- ggplot(patient_ag_lm_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+#Now we call the plot
+patient_ag_lm_plot
+
+
+
+```
+
+####Hidden Confounders
+
+$$Immune Cell = Age + HIV + MSM + HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)$$
+
+```{r}
+
+#The patient vars are defined
+hc_vars <- c("Age","HIV","MSM","HDLNorm","LDLNorm","TriglyceridesNorm","IL6Norm","CRPNorm","LBPNorm")
+
+
+#I set up a basic diet data set for the linear mixed effects results
+
+
+#We generate an linear mixed effects model data set
+hc_lm_data <- unique(expand.grid(hc_vars, cell_vars))
+colnames(hc_lm_data) <- c("Factor","Outcome")
+#We generate fields for the statistics
+#One for the p-value
+hc_lm_data["pval"] <- NA
+#One for the coefficient
+hc_lm_data["coef"] <- NA
+#One for the significance label
+hc_lm_data["sig"] <- NA
+#One field for displayng the actual cell values
+hc_lm_data["DisplayOutcome"] <- NA
+
+for (response in cell_vars){ 
+  # create full model 
+  ff <- as.formula(paste0(response," ~ Age + HIV + MSM + HDLNorm + LDLNorm + TriglyceridesNorm + IL6Norm + CRPNorm + LBPNorm + (1|StudyID)")) 
+  fm <- lmer(ff,
+            data = lmer_data,
+            REML = F)
+
+  for(predictor in hc_vars){ 
+    # create null models 
+    pred <- hc_vars[! hc_vars %in% c(predictor)]
+    pred <- paste0(pred, collapse = "+")
+    nf <- as.formula((paste0(response, "~", pred, "+(1|StudyID)")))
+    nm <- lmer(nf, 
+               data = lmer_data, 
+               REML = F)
+    
+    # test for significance 
+    res <- anova(nm, fm)
+    betas <- fm@beta
+    cols <- c("Intercept", hc_vars)
+    position <- which(cols == predictor)
+    
+    spec_beta <- as.character(fm@beta[position])
+    
+    # if p-value is significant (alpha = 0.05) print the results
+    if (res$`Pr(>Chisq)`[2] < 0.05){ 
+      print((paste0(response, " ~ ", predictor, "   p-val:", res$`Pr(>Chisq)`[2],"   beta:", spec_beta)))
+    } 
+      
+    #We now identify the row in the stat table and add the corresponding p and beta values
+      stat_row <- which(hc_lm_data$Factor==predictor & hc_lm_data$Outcome==response)
+      hc_lm_data$pval[stat_row] <- res$`Pr(>Chisq)`[2]
+      hc_lm_data$coef[stat_row] <- spec_beta
+      #If beta is positive the directionality is positive
+      if (spec_beta>0) {
+        sig <- "Positive"
+      #If beta is negative the directionality is negative
+      } else {
+        sig <- "Negative"
+      }
+      ##If p is under 0.05 we add significant to the directionality
+
+      if (res$`Pr(>Chisq)`[2]<0.05) {
+        sig <- paste0(sig, " (Significant) ")
+      }
+      hc_lm_data$sig[stat_row] <- sig
+    #We pull the display name
+  #To do so, we first select the index
+  response_ind <- which(cell_vars==as.character(response))
+  #Now we select the original column name 
+  display_name <- gsub("_Norm","",orig_lmer_cols[response_ind])
+  hc_lm_data$DisplayOutcome[stat_row] <- display_name     
+
+  }
+  
+}
+
+
+
+#Now we plot those results 
+hc_lm_plot <- ggplot(hc_lm_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", ) +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+#For simplicity we will focus on the significant variables 
+hc_sig_cells <- unique(hc_lm_data$DisplayOutcome[which(hc_lm_data$pval<0.05)])
+
+#We pull the data for those cells
+hc_sig_cell_data <- hc_lm_data[which(hc_lm_data$DisplayOutcome %in% hc_sig_cells & hc_lm_data$Factor %in% c("HDLNorm","LDLNorm","TriglyceridesNorm", "IL6Norm","CRPNorm", "LBPNorm")),]
+
+
+#Now we plot those results
+hc_sig_lm_plot <- ggplot(hc_sig_cell_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", tag="B") +
+  ggtitle("Linear Mixed Effects Models") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 2))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+hc_sig_lm_plot
+
+comb_lm_plot <- ggarrange(sig_patient_ag_lm_plot,hc_sig_lm_plot, common.legend = TRUE)
+
+```
+####Combined Figure
+
+```{r}
+
+#For simplicity we will focus on the significant variables 
+ag_sig_cells <- unique(patient_ag_lm_data$DisplayOutcome[which(patient_ag_lm_data$pval<0.05)])
+
+#For simplicity we will focus on the significant variables 
+hc_sig_cells <- unique(hc_lm_data$DisplayOutcome[which(hc_lm_data$pval<0.05)])
+
+ag_hc_sig_cells <- c(ag_sig_cells,hc_sig_cells)
+
+#We pull the data for those cells
+ag_sig_cell_data <- patient_ag_lm_data[which(patient_ag_lm_data$DisplayOutcome %in% ag_hc_sig_cells),]
+
+
+#Now we plot those results
+sig_patient_ag_lm_plot <- ggplot(ag_sig_cell_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", tag="A") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 4))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25),
+        plot.margin = unit(c(.1,.1,1.24,.1), "cm"))
+
+sig_patient_ag_lm_plot
+
+
+#We pull the data for those cells
+hc_sig_cell_data <- hc_lm_data[which(hc_lm_data$DisplayOutcome %in% ag_hc_sig_cells & hc_lm_data$Factor %in% c("HDLNorm","LDLNorm","TriglyceridesNorm", "IL6Norm","CRPNorm", "LBPNorm")),]
+
+
+#Now we plot those results
+hc_sig_lm_plot <- ggplot(hc_sig_cell_data, aes(x = Factor, y = DisplayOutcome, color=sig)) +
+  scale_color_manual(values=c("lightblue","blue","pink","red"))+
+  geom_point(size=5) +
+  theme_minimal() +
+  labs(x = "Predictor", y = "Response", fill=" ", tag="B") +
+  theme_classic() +
+  guides(color = guide_legend(ncol = 4))+
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "gray", linetype = "solid"),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),
+        axis.text.y = element_text(size=12),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(size = 12, angle=45, hjust=1),
+        strip.text.x = element_text(size=15),
+        strip.text.y = element_text(size=15),
+        title = element_text(size=20),
+        plot.tag = element_text(size=25))
+
+
+hc_sig_lm_plot
+
+comb_lm_plot <- ggarrange(sig_patient_ag_lm_plot,hc_sig_lm_plot, common.legend = TRUE, legend="bottom")
+
+```
+
+
+###Ordination
+
+```{r}
+
+ann_data <- bd_all_proc_imp[,1:17]
+pcoa_data <- bd_all_proc_imp[,18:ncol(bd_all_proc_imp)]
+
+
+di_m <- vegdist(pcoa_data, method="euclidean", na.rm=TRUE)
+
+
+
+log_pcoadata <- pcoa_data
+ordination_result <- prcomp(log_pcoadata)
+biplot(ordination_result)
+
+
+prcomp_res <- ordination_result 
+
+feat_cont <- as.data.frame(prcomp_res$rotation)
+
+feat_cont["Dist"] <- NA
+for (r in 1:nrow(feat_cont)) {
+  feat_cont$Dist[r] <- euclidean(rep(0,51),feat_cont[r,1:51])
+}
+
+
+contributions <- as.data.frame(prcomp_res$center^2)
+colnames(contributions) <- "Cont"
+
+cont_order = as.data.frame(contributions[order(-contributions$Cont),])
+
+cont_top_10 <- cont_order[1:10,1]
+feat_top_10 <- rownames(contributions)[which(contributions$Cont %in% cont_top_10)]
+
+feat_cont_top_10 <- feat_cont[which(rownames(feat_cont) %in% feat_top_10),]
+
+
+feat_arrows <- data.frame(
+  xstart = rep(0,10),  # Replace with your actual x-coordinate start points
+  ystart = rep(0,10),  # Replace with your actual y-coordinate start points
+  xend = 30*feat_cont_top_10$PC1,  # Replace with your actual x-coordinate end points
+  yend = 30*feat_cont_top_10$PC2,  # Replace with your actual y-coordinate end points
+  label=rownames(feat_cont_top_10)
+)
+
+feat_arrows$label <- gsub("_Raw","",feat_arrows$label)
+feat_arrows$label <- gsub("_Norm","",feat_arrows$label)
+
+
+sum_pcoa <- summary(prcomp_res)
+imp_pcoa <- sum_pcoa$importance
+prcomp_res_data <- as.data.frame(prcomp_res$x)
+prcomp_res_met <- cbind(prcomp_res_data,ann_data)
+prcomp_res_met["Diet.Timepoint"] <- paste0(prcomp_res_met$Diet, "-", prcomp_res_met$TimepointNumeric)
+
+prcomp_res_met["Group"] <- ""
+for (n in 1:nrow(prcomp_res_met)) {
+  stud_n <- prcomp_res_met$StudyID[n]
+  time_n <- prcomp_res_met$TimepointNumeric[n]
+  prcomp_res_met$Group[n] <- metadata$Group[which(metadata$StudyID==stud_n & metadata$TimepointNumeric==time_n)]
+}
+
+prcomp_res_met$Group <- gsub("-Negative-","(-)",prcomp_res_met$Group)
+prcomp_res_met$Group <- gsub("-Positive-","(+)",prcomp_res_met$Group)
+
+prcomp_res_met_filt <- prcomp_res_met[which(prcomp_res_met$Group %in% c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),]
+
+pcoaplot_strat <- ggplot() + 
+                        geom_path(data=prcomp_res_met_filt, mapping = aes(x = as.numeric(PC1), y = as.numeric(PC2), group = StudyID),
+            linewidth=1,          
+            position = position_dodge(0.1),
+            alpha = .5,
+            size=1)+
+            geom_point(data = prcomp_res_met_filt, size=4, aes(x = as.numeric(prcomp_res_met_filt$PC1), y = as.numeric(prcomp_res_met_filt$PC2), color=prcomp_res_met_filt$Diet.Timepoint))+
+            scale_color_manual(values = c("lightgreen", "darkgreen", "orange", "orange4"), name="Diet-Timepoint")+
+            labs(x=paste0("PCo1 (",round(imp_pcoa[2,1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(imp_pcoa[2,2]*100, digits = 1),"%)"), key=" ", title="PCoA of Blood CyTOF Data")+
+            guides(color=guide_legend(nrow=1,bycol=TRUE))+
+            theme_bw()+
+            facet_nested(cols=vars(factor(Group, levels=c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW"))),
+                         rows=vars(Diet))+ 
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+pcoaplot_biplot <- ggplot() + 
+                        geom_line(data = prcomp_res_met_filt,aes(x = as.numeric(prcomp_res_met_filt$PC1), y = as.numeric(prcomp_res_met_filt$PC2), group=prcomp_res_met_filt$StudyID), alpha=.5)+
+            geom_point(data = prcomp_res_met_filt, size=4, aes(x = as.numeric(prcomp_res_met_filt$PC1), y = as.numeric(prcomp_res_met_filt$PC2), color=prcomp_res_met_filt$Timepoint))+
+            scale_color_manual(values = c("gray","black"), name="Timepoint")+
+            labs(x=paste0("PCo1 (",round(imp_pcoa[2,1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(imp_pcoa[2,2]*100, digits = 1),"%)"), key=" ", title="PCoA of Blood CyTOF Data")+
+            geom_segment(data = feat_arrows, aes(x = xstart, y = ystart, xend = xend, yend = yend),arrow = arrow(length = unit(0.3, "cm")), color="red")+
+            geom_label_repel(aes(x = feat_arrows$xend, y = feat_arrows$yend, label=feat_arrows$label), size=5, box.padding = 0.5, fill="gray")+
+            guides(color=guide_legend(nrow=2,bycol=TRUE))+
+            theme_bw()+
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+
+##Adonis
+ann_data$Diet <- as.factor(ann_data$Diet)
+ann_data$HIV <- as.factor(ann_data$HIV)
+ann_data$MSM <- as.factor(ann_data$MSM)
+ann_data$StudyID <- as.factor(ann_data$StudyID)
+ann_data$EnterotypeBaseline <- as.factor(ann_data$EnterotypeBaseline)
+
+ann_data_1 <- ann_data[which(ann_data$TimepointNumeric==1),]
+di_m_1 <- vegdist(pcoa_data[which(ann_data$TimepointNumeric==1),], method="euclidean", na.rm=TRUE)
+
+
+ann_data_3 <- ann_data[which(ann_data$TimepointNumeric==3),]
+di_m_3 <- vegdist(pcoa_data[which(ann_data$TimepointNumeric==3),], method="euclidean", na.rm=TRUE)
+
+
+adonis_MSM_HIV_Diet_1 <- adonis2(di_m_1~ann_data_1$MSM + ann_data_1$HIV + ann_data_1$Diet)
+adonis_MSM_HIV_Diet_3 <- adonis2(di_m_3~ann_data_3$MSM + ann_data_3$HIV + ann_data_3$Diet)
+
+adonis_MSM_HIV_Diet <- adonis2(di_m~ann_data$MSM + ann_data$HIV + ann_data$Diet + ann_data$Timepoint + ann_data$StudyID)
+
+#Adonis_Strat_DataSet
+adonis_strat_data_set <- unique(expand.grid(ann_data$TimepointNumeric,c("MSM","HIV","Diet")))
+colnames(adonis_strat_data_set) <- c("TimepointNumeric","Factor")
+adonis_strat_data_set["F_val"] <- NA
+adonis_strat_data_set["R2_val"] <- NA
+adonis_strat_data_set["p_val"] <- NA
+for (j in 1:nrow(adonis_strat_data_set)) {
+  adonis_j <- get(paste0("adonis_MSM_HIV_Diet_",(adonis_strat_data_set$TimepointNumeric[j])))
+  row_j <- which(rownames(adonis_j)==paste0("ann_data_",adonis_strat_data_set$TimepointNumeric[j],"$",adonis_strat_data_set$Factor[j]))  
+  adonis_strat_data_set$F_val[j] <- adonis_j$F[row_j]
+  adonis_strat_data_set$R2_val[j] <- adonis_j$R2[row_j]
+  adonis_strat_data_set$p_val[j] <- adonis_j$`Pr(>F)`[row_j]
+}
+
+adonis_strat_data_set["Timepoint"] <- paste0("T",adonis_strat_data_set$TimepointNumeric)
+barplot_adonis <- ggplot(data=adonis_strat_data_set, aes(x=Factor,y=R2_val, fill=Timepoint)) +
+                  scale_fill_manual(values=c("gray","black"))+
+                  geom_bar(stat="identity", position="dodge")+
+                  geom_text(aes(label = p_val), 
+                    position = position_dodge(width = 1),
+                    vjust = -0.5, 
+                   size = 4, 
+                    color = "black")+
+                  labs(y="R-squared", x="Category")+
+                  theme_bw()+
+                  theme(title=element_text(size=15),
+                    axis.text.y=element_text(size=15),
+                    axis.text.x=element_text(size=15),
+                    strip.text.y = element_text(size=15),
+                    strip.text.x = element_text(size=15),
+                    axis.title = element_text(size=15),
+                    axis.title.y.right = element_text(size = 15),
+                    legend.text=element_text(size=15),
+                    plot.tag = element_text(size=25),
+                    legend.title=element_blank(),
+                    legend.position = "bottom")
+
+
+#Now we stratify by time and the two variables
+msm_prcomp_res_met_filt <- prcomp_res_met_filt
+hiv_prcomp_res_met_filt <- prcomp_res_met_filt
+diet_prcomp_res_met_filt <- prcomp_res_met_filt
+
+msm_prcomp_res_met_filt$Factor <- "MSM Status"
+hiv_prcomp_res_met_filt$Factor <- "HIV Status"
+diet_prcomp_res_met_filt$Factor <- "Diet"
+
+msm_prcomp_res_met_filt$FactorVal <- msm_prcomp_res_met_filt$MSM
+hiv_prcomp_res_met_filt$FactorVal <- hiv_prcomp_res_met_filt$HIV
+diet_prcomp_res_met_filt$FactorVal <- diet_prcomp_res_met_filt$Diet
+
+
+all_start_pcoa <- rbind(msm_prcomp_res_met_filt, hiv_prcomp_res_met_filt, diet_prcomp_res_met_filt)
+
+
+all_pcoa_adonis <- ggplot(data=all_start_pcoa, mapping = aes(x = as.numeric(PC1), y = as.numeric(PC2))) + 
+            geom_path(aes(group=StudyID),
+            linewidth=1,          
+            position = position_dodge(0.1),
+            alpha = .5,
+            size=1)+
+            geom_point(aes(color=FactorVal))+
+            stat_ellipse(geom="polygon",
+                         aes(fill=FactorVal),
+                         alpha=0.25)+
+#            scale_color_manual(values = c("lightgreen", "darkgreen", "orange", "orange4"), name="Diet-Timepoint")+
+            labs(x=paste0("PCo1 (",round(imp_pcoa[2,1]*100, digits=1),"%)"), y=paste0("PCo2 (",round(imp_pcoa[2,2]*100, digits = 1),"%)"), key=" ", title="PCoA of Blood CyTOF Data")+
+            guides(color=guide_legend(nrow=1,bycol=TRUE))+
+            theme_bw()+
+            facet_nested(cols=vars(Timepoint),
+                         rows=vars(Factor))+ 
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+```
+
+
+###T1-T3 Deltas
+
+```{r}
+
+t1t3_delta <- unique(ann_data[,which(colnames(ann_data) %in% c("Group","Diet","StudyID"))])
+t1t3_delta["Delta_T1T3"] <- NA
+for (r in 1:nrow(t1t3_delta)) {
+  stud_r <- t1t3_delta$StudyID[r]
+  row_1 <- which(ann_data$StudyID==stud_r & ann_data$TimepointNumeric==1)
+  row_3 <- which(ann_data$StudyID==stud_r & ann_data$TimepointNumeric==3)
+  data_1 <- as.numeric(pcoa_data[row_1,])
+  data_3 <- as.numeric(pcoa_data[row_3,])
+  dist_r <- euclidean(data_1,data_3)
+  t1t3_delta$Delta_T1T3[r] <- dist_r
+}
+
+
+diet_stats <- rbind(c("Delta_T1T3","HIV(+)MSM","Agrarian","Western"),
+               c("Delta_T1T3","HIV(-)MSM","Agrarian","Western"),
+               c("Delta_T1T3","HIV(-)MSW","Agrarian","Western"))
+diet_stats <- as.data.frame(diet_stats)     
+colnames(diet_stats) <- c("Measure","Group","group1","group2")
+diet_stats["p_val"] <- NA
+
+for (k in 1:nrow(diet_stats)) {
+  data_k <- t1t3_delta[which(t1t3_delta$Group==diet_stats$Group[k]),]
+  wilx_k <- wilcox_test(data=data_k, Delta_T1T3~Diet)
+  diet_stats$p_val[k] <- wilx_k$p
+}
+  
+
+box_plot_diet <- ggplot(data=t1t3_delta, aes(x=Group, y=Delta_T1T3, fill=Diet))+
+  geom_boxplot(outliers=FALSE)+
+  geom_jitter()+
+  scale_fill_manual(values=c("darkgreen","darkorange"))+
+              theme_bw()+
+            theme(title=element_text(size=15),
+              axis.text.y=element_text(size=15),
+              axis.text.x=element_text(size=15),
+              strip.text.y = element_text(size=15),
+              strip.text.x = element_text(size=15),
+              axis.title = element_text(size=15),
+              axis.title.y.right = element_text(size = 15),
+              legend.text=element_text(size=15),
+              plot.tag = element_text(size=25),
+              legend.title=element_blank(),
+              legend.position = "bottom")
+
+```
+

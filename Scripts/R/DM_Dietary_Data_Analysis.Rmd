@@ -1,0 +1,950 @@
+---
+title: "DM Nutrional Data Analysis"
+author: "J. O'Connor"
+date: "2024-05-10"
+output: html_document
+---
+
+## R Nutrional Data Analysis
+
+This is an R Markdown document that includes the R analysis for the diet modification nutrional data study population data.
+
+### Initial Data Loading and Processing 
+
+The initial data is loaded
+
+```{r cars}
+# The Working Directory is Set
+setwd("..")
+
+# Necessary Packages are Loaded
+library(rstatix)
+library(ggplot2)
+library (ggpubr)
+library(tidyr)
+library(reshape2)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(datasets)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(factoextra)
+# Necessary Functions are Sourced 
+function_files <- list.files(paste0(getwd(),"/Functions"), pattern = "\\.R$", full.names = TRUE)
+lapply(function_files, source)
+
+# Metadata is pulled in from an excel file
+metadata_pre <- read_xlsx("Data/Metadata/qiimemetadata.xlsx")
+#We also need to pull a more detailed excel file to use
+detailed_metadata <- read_xlsx("Data/Metadata/metadata.xlsx")
+#We will pull thw preliminary data with the needed MSM Statuse
+msm_add_pre <- detailed_metadata[,which(colnames(detailed_metadata) %in% c("StudyID","TimepointNumeric","MSM_status","MSM_status2"))]
+#We generate the studyID timeppoint field for joining
+msm_add_pre["StudyID-Timepoint"] <- paste0(msm_add_pre$StudyID,".",msm_add_pre$TimepointNumeric)
+#Now we remove the studyID field to avoid repeats
+msm_add <- msm_add_pre[, which(colnames(msm_add_pre) %in% c("MSM_status","MSM_status2","StudyID-Timepoint"))]
+
+#Then we add the MSM fields
+metadata <- left_join(metadata_pre,msm_add, by="StudyID-Timepoint")
+
+# Manual MSM edits per Dr. Lozupone's edits
+MSM_spec <- rbind(c("DM001", "MSM", "MSM"),
+                  c("DM002", "MSM", "MSM"),
+                  c("DM007", "MSM", "MSM"),
+                  c("DM010", "MSM", "MSM"),
+                  c("DM021", "MSW", "NonMSM"),
+                  c("DM093", "MSW", "NonMSM"),
+                  c("DM046", "MSM", "MSM"))
+colnames(MSM_spec) <- c("StudyID", "MSM_status", "MSM_status2")
+MSM_spec <- as.data.frame(MSM_spec)
+
+# MSM status changed made to the medadata file 
+
+for (j in 1:nrow(metadata)) {
+  if (metadata$StudyID[j] %in% MSM_spec$StudyID) {
+    MSM_status_j <- unique(MSM_spec$MSM_status[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    MSM_status2_j <- unique(MSM_spec$MSM_status2[which(MSM_spec$StudyID==metadata$StudyID[j])])
+    metadata$MSM_status[j] <-MSM_status_j 
+    metadata$MSM_status2[j] <-MSM_status2_j 
+  }
+}
+
+#A Group field is been added manually to link groups based on discussions with collaborators and a pairing field is added that provides a numerical value unique to each studyID
+metadata["Group"] <- paste0("HIV-",metadata$HIV_Status,"-", metadata$MSM_status)
+
+#Positive and negative are shortened for aesthetics
+metadata$Group <- gsub("-Positive-","(+)",metadata$Group)
+metadata$Group <- gsub("-Negative-","(-)",metadata$Group)
+
+
+#Clinical data is selected from the Metadata 
+clin <- unique(metadata[which(metadata$Group %in% c("HIV(+)MSM","HIV(-)MSM","HIV(-)MSW")),2:31])
+clin <- as.data.frame(clin)
+#A new T1,T2,T3 field is generated for visual representation
+clin["Timepoint_char"] <- paste0("T",clin$Timepoint)
+```
+
+### Normality Assessment
+Shapiro Tests’s are performed to assess the normality of the nutrional data
+
+```{r pressure, echo=FALSE}
+#Shapiro Tests are Performed
+proNorm <- shapiro.test(as.numeric(clin$`Protein-per1000kcal`))
+## Warning in stopifnot(is.numeric(x)): NAs introduced by coercion
+fatNorm <- shapiro.test(as.numeric(clin$`Fat-per1000kcal`))
+## Warning in stopifnot(is.numeric(x)): NAs introduced by coercion
+crbNorm <- shapiro.test(as.numeric(clin$`Carbs-per1000kcal`))
+## Warning in stopifnot(is.numeric(x)): NAs introduced by coercion
+fbrNorm <- shapiro.test(as.numeric(clin$`Fiber-per1000kcal`))
+## Warning in stopifnot(is.numeric(x)): NAs introduced by coercion
+sodNorm <- shapiro.test(as.numeric(clin$`Sodium-per1000kcal`))
+## Warning in stopifnot(is.numeric(x)): NAs introduced by coercion
+sugNorm <- shapiro.test(as.numeric(clin$`Sugar-per1000kcal`))
+## Warning in stopifnot(is.numeric(x)): NAs introduced by coercion
+#P-values are selected
+Protein_Norm_p <- proNorm$p.value
+Fat_Norm_p <- fatNorm$p.value
+Carbs_Norm_p <- crbNorm$p.value
+Fiber_Norm_p <- fbrNorm$p.value
+Sodium_Norm_p <- sodNorm$p.value
+Sugar_Norm_p <- sugNorm$p.value
+
+#Results are summarized below
+
+#A blank results summary string is generated assuming normality
+res_sum <- "All variables are normally disributed. For Agrarian/Western comparisons t-tests will be used. For comparisons between timepoints linear mixed effects models will be used"
+
+#The results are changed if any of the components are not normal
+for (n in c("Protein", "Fat", "Carbs", "Fiber", "Sodium", "Sugar")) {
+  p_val <- get(paste0(n,"_Norm_p"))
+  if (as.numeric(p_val)<0.05) {
+    print(paste0("Shapiro Test for ",n, " resulted in a p-value under 0.05, indicating that ", n, " data is not normally distributed"))
+    # If any are NOT normally distributed the results summary string is changed
+    res_sum <- "At least one of the variables is not normally disributed. For Agrarian/Western comparisons wilcoxon ranked based tests will be used. For comparisons between timepoints Fredman tests will be used"
+  } else {
+    print(paste0("Shapiro Test for ",n, " resulted in a p-value over 0.05, indicating that ", n, " data is normally distributed"))
+  }
+}
+
+#The new finalresult is printed to indicate normality
+print(res_sum)
+
+```
+
+### Summary Statistics
+
+Below Summary Group and Longitudinal Statistics are Calulated
+
+```{r}
+#The long_stat_sum function takes a data set, subset variables, independent time variables, multiple dependent variables, a random variable, and a normailty boolean and generates p-values and p-significance asterisks
+nut_vars <- c("Protein-per1000kcal","Fat-per1000kcal","Carbs-per1000kcal","Fiber-per1000kcal","Sodium-per1000kcal","Sugar-per1000kcal")
+
+#Each component will be compared across the study period using mixed effects Fredman tests
+sum_nut_long_stats <- long_stat_sum(clin,"Diet","Timepoint_char",nut_vars,"StudyID", FALSE)
+
+print(sum_nut_long_stats)
+
+sum_nut_gp_stats <- gp_stat_sum(clin,"Timepoint_char",nut_vars,"Diet", FALSE)
+
+print(sum_nut_gp_stats)
+
+#xmin and xmax fields are added to the stats tables
+sum_nut_gp_stats["xmin"] <- NA
+sum_nut_gp_stats["xmax"] <- NA
+for (k in 1:nrow(sum_nut_gp_stats)) {
+  if (sum_nut_gp_stats$Timepoint_char[k]=="T1") {
+    sum_nut_gp_stats$xmin[k]<- 0.8
+    sum_nut_gp_stats$xmax[k]<- 1.2
+  } else if (sum_nut_gp_stats$Timepoint_char[k]=="T2") {
+    sum_nut_gp_stats$xmin[k]<- 1.8
+    sum_nut_gp_stats$xmax[k]<- 2.2
+  } else if (sum_nut_gp_stats$Timepoint_char[k]=="T3") {
+    sum_nut_gp_stats$xmin[k]<- 2.8
+    sum_nut_gp_stats$xmax[k]<- 3.2
+  } 
+}
+
+sum_nut_long_stats["xmin"] <- NA
+sum_nut_long_stats["xmax"] <- NA
+for (k in 1:nrow(sum_nut_long_stats)) {
+  if (sum_nut_long_stats$Diet[k]=="Western") {
+    sum_nut_long_stats$xmin[k] <- as.numeric(substr(sum_nut_long_stats$group1[k],2,2)) + 0.2
+    sum_nut_long_stats$xmax[k] <- as.numeric(substr(sum_nut_long_stats$group2[k],2,2)) + 0.2
+  } else {
+    sum_nut_long_stats$xmin[k] <- as.numeric(substr(sum_nut_long_stats$group1[k],2,2)) - 0.2
+    sum_nut_long_stats$xmax[k] <- as.numeric(substr(sum_nut_long_stats$group2[k],2,2)) - 0.2
+  }
+}
+
+```
+
+### Nutrional Box Plots
+
+Below Nutrional Box Plots are Generated
+
+```{r}
+
+##Protein Plot
+pro_gp_stats <- sum_nut_gp_stats[which(sum_nut_gp_stats$Measure=="Protein-per1000kcal"),] 
+pro_long_stats <- sum_nut_long_stats[which(sum_nut_long_stats$Measure=="Protein-per1000kcal"),]
+proplot <- ggplot(clin, aes(x=Timepoint_char, y=as.numeric(clin$`Protein-per1000kcal`))) +
+  geom_boxplot(aes(fill=clin$Diet)) +
+  scale_y_log10() +
+  scale_fill_manual(values=c("darkgreen","darkorange", "darkgreen","darkorange", "darkgreen","darkorange")) +
+  labs(y="Protein per 1000 kCal", x="Timepoint", tag="A")+
+  theme_bw() +
+  theme(
+    title = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.title.y.right = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.tag = element_text(size = 25),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  stat_pvalue_manual(
+    pro_long_stats,
+    label = "p.signif",
+    y.position = 2.3,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  ) +
+  stat_pvalue_manual(
+    pro_gp_stats,
+    label = "p.signif",
+    y.position = 2.2,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  )
+proplot
+
+##Fat Plot
+fat_gp_stats <- sum_nut_gp_stats[which(sum_nut_gp_stats$Measure=="Fat-per1000kcal"),] 
+fat_long_stats <- sum_nut_long_stats[which(sum_nut_long_stats$Measure=="Fat-per1000kcal"),]
+fatplot <- ggplot(clin, aes(x=Timepoint_char, y=as.numeric(clin$`Fat-per1000kcal`))) +
+  geom_boxplot(aes(fill=clin$Diet)) +
+  scale_y_log10() +
+  scale_fill_manual(values=c("darkgreen","darkorange", "darkgreen","darkorange", "darkgreen","darkorange")) +
+  labs(y="Fat per 1000 kCal", x="Timepoint", tag="B")+
+  theme_bw() +
+  theme(
+    title = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.title.y.right = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.tag = element_text(size = 25),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  stat_pvalue_manual(
+    fat_long_stats,
+    label = "p.signif",
+    y.position = 2.3,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  ) +
+  stat_pvalue_manual(
+    fat_gp_stats,
+    label = "p.signif",
+    y.position = 2.2,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  )
+fatplot
+
+##Carbs Plot
+carb_gp_stats <- sum_nut_gp_stats[which(sum_nut_gp_stats$Measure=="Carbs-per1000kcal"),] 
+carb_long_stats <- sum_nut_long_stats[which(sum_nut_long_stats$Measure=="Carbs-per1000kcal"),]
+carbplot <- ggplot(clin, aes(x=Timepoint_char, y=as.numeric(clin$`Carbs-per1000kcal`))) +
+  geom_boxplot(aes(fill=clin$Diet)) +
+  scale_y_log10() +
+  scale_fill_manual(values=c("darkgreen","darkorange", "darkgreen","darkorange", "darkgreen","darkorange")) +
+  labs(y="Carbs per 1000 kCal", x="Timepoint", tag="C")+
+  theme_bw() +
+  theme(
+    title = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.title.y.right = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.tag = element_text(size = 25),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  stat_pvalue_manual(
+    carb_long_stats,
+    label = "p.signif",
+    y.position = 2.8,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  ) +
+  stat_pvalue_manual(
+    carb_gp_stats,
+    label = "p.signif",
+    y.position = 2.7,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  )
+carbplot
+
+##Fiber Plot
+fbr_gp_stats <- sum_nut_gp_stats[which(sum_nut_gp_stats$Measure=="Fiber-per1000kcal"),] 
+fbr_long_stats <- sum_nut_long_stats[which(sum_nut_long_stats$Measure=="Fiber-per1000kcal"),]
+fbrplot <- ggplot(clin, aes(x=Timepoint_char, y=as.numeric(clin$`Fiber-per1000kcal`))) +
+  geom_boxplot(aes(fill=clin$Diet)) +
+  scale_y_log10() +
+  scale_fill_manual(values=c("darkgreen","darkorange", "darkgreen","darkorange", "darkgreen","darkorange")) +
+  labs(y="Fiber per 1000 kCal", x="Timepoint", tag="D")+
+  theme_bw() +
+  theme(
+    title = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.title.y.right = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.tag = element_text(size = 25),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  stat_pvalue_manual(
+    fbr_long_stats,
+    label = "p.signif",
+    y.position = 2.2,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  ) +
+  stat_pvalue_manual(
+    fbr_gp_stats,
+    label = "p.signif",
+    y.position = 2.0,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  )
+fbrplot
+
+##Sodium Plot
+sod_gp_stats <- sum_nut_gp_stats[which(sum_nut_gp_stats$Measure=="Sodium-per1000kcal"),] 
+sod_long_stats <- sum_nut_long_stats[which(sum_nut_long_stats$Measure=="Sodium-per1000kcal"),]
+sodplot <- ggplot(clin, aes(x=Timepoint_char, y=as.numeric(clin$`Sodium-per1000kcal`))) +
+  geom_boxplot(aes(fill=clin$Diet)) +
+  scale_y_log10() +
+  scale_fill_manual(values=c("darkgreen","darkorange", "darkgreen","darkorange", "darkgreen","darkorange")) +
+  labs(y="Sodium per 1000 kCal", x="Timepoint", tag="E")+
+  theme_bw() +
+  theme(
+    title = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.title.y.right = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.tag = element_text(size = 25),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  stat_pvalue_manual(
+    sod_long_stats,
+    label = "p.signif",
+    y.position = 3.8,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  ) +
+  stat_pvalue_manual(
+    sod_gp_stats,
+    label = "p.signif",
+    y.position = 3.6,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  )
+sodplot
+
+##Sugar Plot
+sug_gp_stats <- sum_nut_gp_stats[which(sum_nut_gp_stats$Measure=="Sugar-per1000kcal"),] 
+sug_long_stats <- sum_nut_long_stats[which(sum_nut_long_stats$Measure=="Sugar-per1000kcal"),]
+sugplot <- ggplot(clin, aes(x=Timepoint_char, y=as.numeric(clin$`Sugar-per1000kcal`))) +
+  geom_boxplot(aes(fill=clin$Diet)) +
+  scale_y_log10() +
+  scale_fill_manual(values=c("darkgreen","darkorange", "darkgreen","darkorange", "darkgreen","darkorange")) +
+  labs(y="Sugar per 1000 kCal", x="Timepoint", tag="F")+
+  theme_bw() +
+  theme(
+    title = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.title.y.right = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.tag = element_text(size = 25),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  stat_pvalue_manual(
+    sug_long_stats,
+    label = "p.signif",
+    y.position = 2.4,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  ) +
+  stat_pvalue_manual(
+    sug_gp_stats,
+    label = "p.signif",
+    y.position = 2.2,
+    step.increase = 0.1,
+    hide.ns=TRUE
+  )
+sugplot
+
+
+
+```
+
+### Nutrional Heat Map
+
+Below I generate the average values for each Timepoint and p-values
+
+```{r}
+
+#We are only assessing differences from baseline for the heatmap statistics, so we generate a base table with measures split by diet, with timepoint1 being T1 and timepoint2 being in T1,T2, and T3
+heatmap_data <- unique(expand.grid(nut_vars, c("Western","Agrarian"), c("T1"), c("T1","T2","T3")))
+#We name the columns
+colnames(heatmap_data) <- c("Variable", "Diet", "Timepoint1","Timepoint2")
+
+#We will generate an average field for a heatmap as well as p values pulled from the longitudinal Friedman test statistics
+heatmap_data["Average"] <- NA
+heatmap_data["p_val"] <- NA
+
+#A clinheatmap data is generated to allow for visual sclaing of average
+clin_heatmap <- clin
+
+nut_cols <- which(colnames(clin_heatmap) %in% nut_vars)
+
+#We will scale the values for visualization 
+clin_heatmap$`Carbs-per1000kcal` <- scale(as.numeric(clin_heatmap$`Carbs-per1000kcal`))
+clin_heatmap$`Fat-per1000kcal` <- scale(as.numeric(clin_heatmap$`Fat-per1000kcal`))
+clin_heatmap$`Fiber-per1000kcal` <- scale(as.numeric(clin_heatmap$`Fiber-per1000kcal`))
+clin_heatmap$`Protein-per1000kcal` <- scale(as.numeric(clin_heatmap$`Protein-per1000kcal`))
+clin_heatmap$`Sodium-per1000kcal` <- scale(as.numeric(clin_heatmap$`Sodium-per1000kcal`))
+clin_heatmap$`Sugar-per1000kcal` <- scale(as.numeric(clin_heatmap$`Sugar-per1000kcal`))
+
+  
+#Now we go through the data and pull average values and p values  
+for (j in 1:nrow(heatmap_data)) {
+  #Variable is pulled
+  var_j <- as.character(heatmap_data$Variable[j])
+  #Diet is pulled
+  diet_j <- as.character(heatmap_data$Diet[j])
+  #Timepoints are pulled
+  tp1_j <- as.character(heatmap_data$Timepoint1[j])
+  tp2_j <- as.character(heatmap_data$Timepoint2[j])
+  #We pull the average of the second timepoint
+  avg_j <- mean(as.numeric(clin_heatmap[which(clin_heatmap$Diet==diet_j & clin_heatmap$Timepoint_char==tp2_j),which(colnames(clin_heatmap)==var_j)]), na.rm=TRUE)
+  #If it the second timepoint it T1 no p value is needed but if is not T1 we can pull a p-value
+  if (tp2_j=="T1") {
+    p_j <- NA  
+  } else {
+    p_j <- sum_nut_long_stats$`p-value`[which(sum_nut_long_stats$Measure==var_j & sum_nut_long_stats$Diet==diet_j & sum_nut_long_stats$group1 %in% c(tp1_j,tp2_j) & sum_nut_long_stats$group2 %in% c(tp1_j,tp2_j))]
+  }
+  #Average and p values are put in the table
+  heatmap_data$Average[j] <- avg_j
+  heatmap_data$p_val[j] <- p_j
+}
+
+#We create a field for the adjusted p values 
+heatmap_data["padj"] <- NA
+#Now we need to adjust the p-values, so we have to do subsets of p-value Bonferroni corrections
+#We pull unique diets and measures 
+var_diet_combos <- unique(sum_nut_long_stats[,1:2])
+
+#For these measures we do subsets of p-value corrections 
+for (l in 1:nrow(var_diet_combos)) {
+  #Variable is pulled
+  var_l <- as.character(var_diet_combos$Measure[l])
+  #Diet is pulled
+  diet_l <- as.character(var_diet_combos$Diet[l])
+  heatmap_data$padj[which(heatmap_data$Variable==var_l & heatmap_data$Diet==diet_l & heatmap_data$Timepoint2 %in% c("T2", "T3"))] <- p.adjust(heatmap_data$p_val[which(heatmap_data$Variable==var_l & heatmap_data$Diet==diet_l & heatmap_data$Timepoint2 %in% c("T2", "T3"))], method="bonferroni")
+}
+
+#Now significance values are added
+heatmap_data["psig"] <- ""
+
+heatmap_data$psig[which(!is.na(heatmap_data$padj))] <- add_asterisks(heatmap_data$padj[which(!is.na(heatmap_data$padj))])
+
+#For visualization, we remove the "-per1000kcal"
+heatmap_data["NewVariable"] <- gsub("-per1000kcal","", heatmap_data$Variable)
+
+
+#Now we genrate a heatmap figure
+heatmap_fig <- ggplot(aes(x=Timepoint2, y=Diet, fill=Average), data=heatmap_data)+
+                  geom_tile() + scale_fill_gradient2(high="#D7191C", mid="white", low="#2C7BB6") + 
+                  geom_text(aes(label=psig), color="black", size=5) + 
+                  labs(y=NULL, x=NULL, fill="Average of Z-Score", tag="B") + 
+                  theme_bw() +
+                  theme(legend.position = "bottom",
+                    legend.title = element_text(size = 15),
+                    legend.text = element_text(size = 10),
+                    axis.text.x = element_text(size = 15),
+                    axis.title.y = element_text(size = 20),
+                    axis.title.x = element_blank(),
+                    axis.text.y = element_text(size = 15),
+                    strip.text.x = element_text(size=15),
+                    strip.text.y = element_text(size=15),
+                    plot.tag = element_text(size=25),
+                    ggh4x.facet.nestline = element_blank(),
+                    strip.background.x = element_rect(
+                      color="black", fill="gray", linetype="solid"
+                    ),
+                    strip.background.y = element_rect(
+                      color="black", fill="gray", linetype="solid"
+                    )) +
+                    facet_wrap(~ NewVariable , nrow = 2, ncol = 3)
+                
+
+```
+
+### Ordination Analysis
+
+Below we do the ordination analysis 
+
+```{r}
+
+#Below we will include just samples that have dietary data and we will include 
+
+#Initially studyIDs and timepoints are included 
+clindiet_pre <- clin[which(clin$`Protein-per1000kcal`!="NA"),c(2,4,which(colnames(clin) %in% nut_vars))]
+rownames(clindiet_pre) <- paste0(clindiet_pre[,1], "-T", clindiet_pre[,2])
+
+#After the rownames have changes we can remove the studyID and timepoint
+clindiet <- clindiet_pre[,3:ncol(clindiet_pre)]
+
+#Standard Agrarian and Western Diets have been provided and are appended to the clindiet data frame 
+
+standag <- matrix(NA, 1, ncol(clindiet))
+standwe <- matrix(NA, 1, ncol(clindiet))  
+colnames(standag) <- colnames(clindiet)
+colnames(standwe) <- colnames(clindiet)
+clindiet <- rbind(clindiet, standag, standwe)
+
+###Per Cathy and Jack's Discussion the following lines have been replaced such that the standard agrarian is just the average of the second time point instead of set prefined values
+
+#This is when they were preset 
+#clindiet[nrow(clindiet)-1,] <- c((66.75/2), (66.75/2), (311.5/2), (45/2), (1325/2), (67/2))
+#clindiet[nrow(clindiet),] <-  c((62/2), (124.5/2), (228/2), (18/2), (3650/2), (114/2))
+
+#Instead we do the average of the second timepoint
+
+#So first we select agrarian and western diet studyIDs
+ag_study_ids <- clin$StudyID[which(clin$Diet=="Agrarian")]
+we_study_ids <- clin$StudyID[which(clin$Diet=="Western")]
+
+#Then we pulled the second time 
+ag_t2_rows <- which(clindiet_pre$Timepoint==2 & clindiet_pre$StudyID %in% ag_study_ids)
+we_t2_rows <- which(clindiet_pre$Timepoint==2 & clindiet_pre$StudyID %in% we_study_ids)
+  
+ag_vec <- mean(clindiet[ag_t2_rows,1], na.rm=TRUE)
+we_vec <- mean(clindiet[we_t2_rows,1], na.rm=TRUE)
+clindiet[nrow(clindiet)-1,] <- c(mean(as.numeric(clindiet[ag_t2_rows,1]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,2]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,3]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,4]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,5]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,6]), na.rm=TRUE)) 
+clindiet[nrow(clindiet),] <-  c(mean(as.numeric(clindiet[we_t2_rows,1]), na.rm=TRUE),mean(as.numeric(clindiet[we_t2_rows,2]), na.rm=TRUE),mean(as.numeric(clindiet[we_t2_rows,3]), na.rm=TRUE),mean(as.numeric(clindiet[we_t2_rows,4]), na.rm=TRUE),mean(as.numeric(clindiet[we_t2_rows,5]), na.rm=TRUE),mean(as.numeric(clindiet[we_t2_rows,6]), na.rm=TRUE)) 
+
+
+#The names of the diets are indicated accordingly
+rownames(clindiet)[nrow(clindiet)-1] <- "Standard-Agrarian"
+rownames(clindiet)[nrow(clindiet)] <- "Standard-Western"
+
+#The data will be converted to numericl variables 
+for (j in 1:ncol(clindiet)) {
+  clindiet[,j] <- as.numeric(clindiet[,j])
+}
+
+#Ordination will be  performed on this data set with an initial PCA transform 
+pca_trans <- prcomp(log(clindiet), scale=TRUE)
+
+#Biplots are generated below
+biplot(pca_trans,
+       col = c('darkblue', 'red'),
+       scale = 0, xlabs = rep("*", nrow(clindiet)))
+
+
+
+fviz_pca_biplot(pca_trans, geom="point", repel = TRUE)
+
+
+#CLinical Data is appended to the PCA output
+totalpcaplot <- cbind(pca_trans[["x"]], matrix(NA,nrow(pca_trans[["x"]]),9))
+colnames(totalpcaplot)[(ncol(totalpcaplot)-8):ncol(totalpcaplot)] <- c(nut_vars,"Diet","Timepoint","Diet-Timepoint") 
+
+for (r in 1:(nrow(totalpcaplot)-2)) {
+  stud_r <- substr(rownames(totalpcaplot)[r],1,5) 
+  time_r <- substr(rownames(totalpcaplot)[r],8,8)
+  data_r <- clin[which(as.character(clin$StudyID)==as.character(stud_r) & as.numeric(clin$Timepoint)==as.numeric(time_r)),]
+  diet_r <- data_r$Diet
+  totalpcaplot[r,ncol(totalpcaplot)] <- paste0(diet_r,"-T",time_r)
+  for (j in (ncol(totalpcaplot)-8):(ncol(totalpcaplot)-1)) {
+    totalpcaplot[r,j] <- data_r[,which(colnames(data_r)==colnames(totalpcaplot)[j])]
+  }
+}
+
+#ONce again per discussion with Cathy this has been changed to be the average of the second timepoint
+
+#totalpcaplot[nrow(totalpcaplot)-1,(ncol(totalpcaplot)-8):ncol(totalpcaplot)] <- c((66.75/2), (66.75/2), (311.5/2), (45/2), (1325/2), (67/2),"Agrarian", NA, "Standard-Agrarian") 
+#totalpcaplot[nrow(totalpcaplot),(ncol(totalpcaplot)-8):ncol(totalpcaplot)] <- c((62/2), (124.5/2), (228/2), (18/2), (3650/2), (114/2), "Western", NA, "Standard-Western")
+totalpcaplot[nrow(totalpcaplot)-1,(ncol(totalpcaplot)-8):ncol(totalpcaplot)] <- c(c(mean(as.numeric(clindiet[ag_t2_rows,1]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,2]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,3]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,4]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,5]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,6]), na.rm=TRUE)),"Agrarian", NA, "Standard-Agrarian")
+totalpcaplot[nrow(totalpcaplot),(ncol(totalpcaplot)-8):ncol(totalpcaplot)] <- c(c(mean(as.numeric(clindiet[ag_t2_rows,1]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,2]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,3]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,4]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,5]), na.rm=TRUE),mean(as.numeric(clindiet[ag_t2_rows,6]), na.rm=TRUE)), "Western", NA, "Standard-Western")
+
+totalpcaplot <- as.data.frame(totalpcaplot)
+totalpcaplot["StudyID"] <- substr(rownames(totalpcaplot), 1,5)
+nutpcaplot <- ggplot() + 
+    geom_line(data = totalpcaplot, alpha = .3, aes(x = as.numeric(PC1), y = as.numeric(PC2), group=StudyID))+
+  geom_point(data = totalpcaplot, size = 4, aes(x = as.numeric(PC1), y = as.numeric(PC2), fill = totalpcaplot$`Diet-Timepoint`, shape = totalpcaplot$`Diet-Timepoint`, colour = totalpcaplot$`Diet-Timepoint`), stroke = 1) +
+  scale_fill_manual(values = c("Agrarian-T1"="lightgreen", "Agrarian-T2"="green", "Agrarian-T3"="darkgreen", "Standard-Agrarian"="red", "Western-T1"= "orange", "Western-T2"= "orange3", "Western-T3"= "orange4", "Standard-Western"="yellow"), name = "Diet-Timepoint",
+                    breaks = c("Agrarian-T1", "Agrarian-T2", "Agrarian-T3", "Standard-Agrarian", "Western-T1", "Western-T2", "Western-T3", "Standard-Western"),
+                    labels = c("Agrarian-T1", "Agrarian-T2", "Agrarian-T3", "Standard-Agrarian", "Western-T1", "Western-T2", "Western-T3", "Standard-Western")) +
+  scale_shape_manual(values = c("Agrarian-T1"=21, "Agrarian-T2"=21, "Agrarian-T3"=21, "Standard-Agrarian"=23, "Western-T1"= 21, "Western-T2"= 21, "Western-T3"= 21, "Standard-Western"=23), name = "Diet-Timepoint",
+                     breaks = c("Agrarian-T1", "Agrarian-T2", "Agrarian-T3", "Standard-Agrarian", "Western-T1", "Western-T2", "Western-T3", "Standard-Western"),
+                     labels = c("Agrarian-T1", "Agrarian-T2", "Agrarian-T3", "Standard-Agrarian", "Western-T1", "Western-T2", "Western-T3", "Standard-Western"))+
+  scale_colour_manual(values = c("Agrarian-T1"="black", "Agrarian-T2"="black", "Agrarian-T3"="black", "Standard-Agrarian"="darkgreen", "Western-T1"= "black", "Western-T2"= "black", "Western-T3"="black", "Standard-Western"="orange4"), name = "Diet-Timepoint",
+                      breaks = c("Agrarian-T1", "Agrarian-T2", "Agrarian-T3","Standard-Agrarian", "Western-T1", "Western-T2", "Western-T3", "Standard-Western"),
+                      labels = c("Agrarian-T1", "Agrarian-T2", "Agrarian-T3", "Standard-Agrarian",  "Western-T1", "Western-T2", "Western-T3", "Standard-Western"))+
+  labs(x = "PC1 (55.6%)", y = "PC2 (23.5%)", key = " ", title = "PCA of Nutritional Data", tag = "A") +
+  guides(fill = guide_legend(nrow = 4, bycol = TRUE)) +
+  theme_bw() +
+  theme(
+    title = element_text(size = 15),
+    axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.title.y.right = element_text(size = 15),
+    legend.text = element_text(size = 15),
+    plot.tag = element_text(size = 25),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) 
+
+
+
+```
+
+### Euclidean Distances
+
+```{r}
+
+#Now we will look at euclidean distances across the study peirod to see how nutrional intake changes
+totalpcaplot['T1-T2'] <- NA
+totalpcaplot['T1-T3'] <- NA
+
+for (k in 1:(nrow(totalpcaplot)-2)) {
+  stud_k <-substr(rownames(totalpcaplot)[k],1,5) 
+  data_k_1 <- clin[which(clin$StudyID==stud_k & clin$Timepoint==1),which(colnames(clin) %in% nut_vars)]
+  data_k_2 <- clin[which(clin$StudyID==stud_k & clin$Timepoint==2),which(colnames(clin) %in% nut_vars)]
+  data_k_3 <- clin[which(clin$StudyID==stud_k & clin$Timepoint==3),which(colnames(clin) %in% nut_vars)]
+  if (nrow(data_k_1)==1 & nrow(data_k_2)==1) {
+    totalpcaplot$`T1-T2`[k] <- euclidean(as.numeric(data_k_1),as.numeric(data_k_2))
+  }
+  if (nrow(data_k_1)==1 & nrow(data_k_3)==1) {
+    totalpcaplot$`T1-T3`[k] <- euclidean(as.numeric(data_k_1),as.numeric(data_k_3))
+  }
+}
+
+t1t2_nut_data <- unique(totalpcaplot[which(!is.na(totalpcaplot$`T1-T2`)),c(13,17)])
+t1t3_nut_data <- unique(totalpcaplot[which(!is.na(totalpcaplot$`T1-T3`)),c(13,18)])
+
+#Normality tests
+t1t2_Norm <- shapiro.test(as.numeric(t1t2_nut_data$`T1-T2`))
+t1t2_Norm_p <- t1t2_Norm$p.value
+t1t3_Norm <- shapiro.test(as.numeric(t1t3_nut_data$`T1-T3`))
+t1t3_Norm_p <- t1t3_Norm$p.value
+
+res_sum_t1t2 <- "T1-T2 and T1-T3 euclidean distances are normally disributed. For Agrarian/Western comparisons t-tests will be used." 
+
+for (n in c("t1t2", "t1t3")) {
+  p_val <- get(paste0(n,"_Norm_p"))
+  if (as.numeric(p_val)<0.05) {
+    print(paste0("Shapiro Test for ",n, " resulted in a p-value under 0.05, indicating that ", n, " data is not normally distributed"))
+    # If any are NOT normally distributed the results summary string is changed
+    res_sum_t1t2 <- "At least one of the variables is not normally disributed. For Agrarian/Western comparisons wilcoxon ranked based tests will be used."
+  } else {
+    print(paste0("Shapiro Test for ",n, " resulted in a p-value over 0.05, indicating that ", n, " data is normally distributed"))
+  }
+}
+
+print(res_sum_t1t2)
+
+t1t2_wilx <- wilcox.test(as.numeric(`T1-T2`)~Diet, data=t1t2_nut_data)
+t1t3_wilx <- wilcox.test(as.numeric(`T1-T3`)~Diet, data=t1t3_nut_data)
+
+#T1-T2 and T1-T3 stats stable is generated 
+
+t1t2_stats_vec <- c("T1-T2", "Agrarian", "Western",t1t2_wilx$p.value, add_asterisks(t1t2_wilx$p.value))
+t1t3_stats_vec <- c("T1-T3", "Agrarian", "Western",t1t3_wilx$p.value, add_asterisks(t1t3_wilx$p.value))
+
+t1t2_stats <- as.data.frame(t(t1t2_stats_vec))
+t1t3_stats <- as.data.frame(t(t1t3_stats_vec))
+
+colnames(t1t2_stats) <- c("Measure", "group1", "group2", "p-value", "p.signif")
+colnames(t1t3_stats) <- c("Measure", "group1", "group2", "p-value", "p.signif")
+
+#T1-T2 Plot with stats
+nutt1t2plot <- ggplot(t1t2_nut_data, aes(x=Diet, y=as.numeric(t1t2_nut_data$`T1-T2`))) +
+  geom_boxplot(aes(fill=Diet))+
+  scale_y_log10() +
+  geom_jitter()+
+  scale_fill_manual(values=c("darkgreen","darkorange")) +
+  labs(y="Euclidean Distance T1-T2", x="", tag="A")+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        strip.text.x = element_text(size=10),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  stat_pvalue_manual(
+    t1t2_stats,
+    label = "p.signif",
+    y.position = 4
+  )
+
+#T1-T3 Plot with stats
+nutt1t3plot <- ggplot(t1t3_nut_data, aes(x=Diet, y=as.numeric(t1t3_nut_data$`T1-T3`))) +
+  geom_boxplot(aes(fill=Diet))+
+  scale_y_log10() +
+  geom_jitter()+
+  scale_fill_manual(values=c("darkgreen","darkorange")) +
+  labs(y="Euclidean Distance T1-T3", x="", tag="B")+
+  theme_bw()+
+  theme(legend.position = "none",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        strip.text.x = element_text(size=10),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  stat_pvalue_manual(
+    t1t2_stats,
+    label = "p.signif",
+    y.position = 4
+  )
+
+print(t1t2_stats)
+print(t1t3_stats)
+
+
+```
+
+
+### Compliance Analysis
+
+Below we perform compliance analysis
+
+```{r}
+###First the agrarian subjects are seperated out form the western subjects 
+comp_data_ag <- totalpcaplot[which(totalpcaplot$Diet=="Agrarian"),which(colnames(totalpcaplot) %in% c("Diet","Timepoint",nut_vars))]
+comp_data_ag["StandardAgrarian"] <- NA
+comp_data_ag["Timepoint_char"] <- paste0("T", comp_data_ag$Timepoint)
+comp_data_ag["StudyID"] <- substr(rownames(comp_data_ag),1,5)
+stand_ag_vec <- comp_data_ag[which(rownames(comp_data_ag)=="Standard-Agrarian"),which(colnames(comp_data_ag) %in% nut_vars)] 
+
+#Standard Agrarian euclidean distances are calulated 
+for (k in 1:nrow(comp_data_ag)) {
+  comp_data_ag_k_vec <- comp_data_ag[k,which(colnames(comp_data_ag) %in% nut_vars)]
+  comp_data_ag$StandardAgrarian[k] <- euclidean(as.numeric(stand_ag_vec),as.numeric(comp_data_ag_k_vec))
+}
+
+ag_comp_stat_data <- comp_data_ag[which(rownames(comp_data_ag)!="Standard-Agrarian"),]
+ag_comp_stats <- long_stat_sum(ag_comp_stat_data,"Diet","Timepoint_char","StandardAgrarian","StudyID",FALSE)
+
+#Now we do a Bonferonni correction on p-values
+ag_comp_stats["padj"] <- p.adjust(ag_comp_stats$`p-value`)
+ag_comp_stats["p.signif.2"] <- add_asterisks(ag_comp_stats$padj)
+
+#A box plot of the agrarian euclidean distances is generated
+agboxplot <- ggplot(data = ag_comp_stat_data,
+                    mapping = aes(x = Timepoint_char, y = as.numeric(StandardAgrarian))) +
+  geom_boxplot(aes(fill=Diet)) +
+  scale_fill_manual(values=c("darkgreen"))+
+  geom_jitter()+
+  labs(y="Euclidean Distance from Standard Agrarian", tag="C")+
+  theme_bw() +
+  theme(legend.position = "none",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        strip.text.x = element_text(size=10),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  stat_pvalue_manual(
+    ag_comp_stats,
+    label = "p.signif.2",
+    hide.ns = TRUE,
+    y.position = 2000,
+    step.increase = 0.07
+  ) 
+
+#A histogram is also generated
+aghistplot <- ggplot(ag_comp_stat_data, aes(x=as.numeric(StandardAgrarian), fill=Diet)) +
+  scale_fill_manual(values=c("darkgreen"))+
+  geom_histogram(alpha=0.5, position="identity") +
+  facet_grid(Timepoint_char~., scales="free_y", switch = "y") +
+  labs(tag="A",x="Euclidean Distance from Standard Agrarian",y="Count") +
+  theme_bw() +
+  theme(legend.position = "none",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        strip.text.x = element_text(size=10),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  scale_y_continuous(position = "right", limits = c(0,25))
+
+###First the western subjects are seperated out form the western subjects 
+comp_data_we <- totalpcaplot[which(totalpcaplot$Diet=="Western"),which(colnames(totalpcaplot) %in% c("Diet","Timepoint",nut_vars))]
+comp_data_we["StandardWestern"] <- NA
+comp_data_we["Timepoint_char"] <- paste0("T", comp_data_we$Timepoint)
+comp_data_we["StudyID"] <- substr(rownames(comp_data_we),1,5)
+stand_we_vec <- comp_data_we[which(rownames(comp_data_we)=="Standard-Western"),which(colnames(comp_data_we) %in% nut_vars)] 
+
+#Standard Western euclidean distances are calculated 
+for (k in 1:nrow(comp_data_we)) {
+  comp_data_we_k_vec <- comp_data_we[k,which(colnames(comp_data_we) %in% nut_vars)]
+  comp_data_we$StandardWestern[k] <- euclidean(as.numeric(stand_we_vec),as.numeric(comp_data_we_k_vec))
+}
+
+we_comp_stat_data <- comp_data_we[which(rownames(comp_data_we)!="Standard-Western"),]
+we_comp_stats <- long_stat_sum(we_comp_stat_data,"Diet","Timepoint_char","StandardWestern","StudyID",FALSE)
+
+#Now we do a Bonferonni correction on p-values
+we_comp_stats["padj"] <- p.adjust(we_comp_stats$`p-value`)
+we_comp_stats["p.signif.2"] <- add_asterisks(we_comp_stats$padj)
+
+
+#A box plot of the agrarian euclidean distances is generated
+weboxplot <- ggplot(data = we_comp_stat_data,
+                    mapping = aes(x = Timepoint_char, y = as.numeric(StandardWestern))) +
+  geom_boxplot(aes(fill=Diet)) +
+  scale_fill_manual(values=c("darkorange"))+
+  geom_jitter()+
+  labs(y="Euclidean Distance from Standard Western", tag="D")+
+  theme_bw() +
+  theme(legend.position = "none",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        strip.text.x = element_text(size=10),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  stat_pvalue_manual(
+    we_comp_stats,
+    label = "p.signif.2",
+    hide.ns = TRUE,
+    y.position = 2700,
+    step.increase = 0.07
+  ) 
+
+#A histogram is also generated
+wehistplot <- ggplot(we_comp_stat_data, aes(x=as.numeric(StandardWestern), fill=Diet)) +
+  scale_fill_manual(values=c("darkorange"))+
+  geom_histogram(alpha=0.5, position="identity") +
+  facet_grid(Timepoint_char~., scales="free_y", switch = "y") +
+  labs(tag="B",x="Euclidean Distance from Standard Western",y="Count") +
+  theme_bw() +
+  theme(legend.position = "none",
+        legend.title = element_text(size = 10),
+        legend.text = element_text(size = 10),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(size = 10),
+        strip.text.x = element_text(size=10),
+        strip.text.y = element_text(size=10),
+        plot.tag = element_text(size=25),
+        strip.background.x = element_rect(
+          color="black", fill="gray", linetype="solid"
+        ),
+        strip.background.y = element_rect(
+          color="black", fill="gray", linetype="solid"
+        )) +
+  scale_y_continuous(position = "right", limits = c(0,15))
+
+#All the plots are now put together
+
+grid.arrange(weboxplot, wehistplot, nrow=2)
+```
+###Plot Generation
+
+Below we organize the plots for the paper
+```{r}
+#Figure 1 is the ordination and the heatmap
+fig_1 <- ggarrange(nutpcaplot, heatmap_fig, nrow=1)
+
+fig_1 
+
+#Supplemental Figure 1 is the deltas (A and B are differences from baselin and C and C are differences from standard agrarian and western)
+
+supp_fig_1AB <- ggarrange(nutt1t2plot,nutt1t3plot, nrow=1, common.legend = TRUE, legend="none")
+supp_fig_1CD <- ggarrange(agboxplot, weboxplot, nrow=1, legend="none")
+
+supp_fig_1 <- ggarrange(supp_fig_1AB, supp_fig_1CD, get_legend(nutt1t2plot), nrow=3, heights=c(5,5,1))
+
+supp_fig_1
+
+supp_fig_2 <- ggarrange(proplot, fatplot, carbplot, fbrplot, sodplot, sugplot, ncol=3, nrow=2, common.legend = TRUE, legend="bottom")
+
+supp_fig_2
+
+
+```
+

@@ -1,0 +1,11 @@
+start time: 2024-07-11 14:16:23.208458
+SCNIC analysis type: module
+input correls: SCNIC_within_Output/correls.txt
+output directory: /Users/johnoconnor/HIV-Diet-Intervention/Data/QIIME_Files/Fecal/SCNIC_modules_output
+number of modules created: 18
+input uncollapsed table: exported-genus-collapsed-sepp-filtered-rarefied-table/feature-table.biom
+number of observations in output table: 231
+number of nodes: 62
+number of edges: 134
+finish time: 2024-07-11 14:16:24.063939
+elapsed time: 0:00:00.855481
